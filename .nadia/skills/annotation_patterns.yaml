@@ -11,6 +11,12 @@
 #   source:    "fix" (human correction) | "confirmed" (human approved without changes)
 #   issues:    list of GitHub issue numbers that informed this rule
 #   added:     ISO date this entry was created or last updated
+#
+# Dream review log (weeks with no actionable annotation signal — no edits made):
+#   2026-06-07: review window 2026-05-31..2026-06-07 — 0 fix commands, 0 status
+#               reports, 0 new approvals, 0 vocabulary gaps. No annotation
+#               patterns added or changed. (Daily runs failed 05-31..06-03 with
+#               operational errors, issues #306-309 — infra, not annotation signal.)
 
 patterns:
 
