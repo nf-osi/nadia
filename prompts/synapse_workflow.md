@@ -333,9 +333,18 @@ validation = js.validate(files_folder.id)
 print(f"  Schema bound: {schema_uri}")
 ```
 
-### Step 6 — Mint a stable snapshot version of the Dataset
+### Step 6 — Mint a stable snapshot version of the Dataset (audit Phase 3 only)
 
-After all annotations are confirmed correct, mint a stable version of the Dataset entity. This gives data managers a permanent, citable snapshot.
+A stable version of the Dataset entity gives data managers a permanent, citable snapshot.
+The helper below is the sanctioned way to mint it.
+
+> **WHERE this runs:** Do NOT mint at creation time. Minting happens once, in audit
+> **Phase 3** (`apply_audit_fixes.py`), after all annotation fixes are applied — a snapshot
+> minted before annotations are finalized points to unannotated file versions and shows blank
+> columns. `create_project.py` creates the Dataset but leaves it unsnapshotted. See CLAUDE.md
+> ("Stable Dataset versions must be minted in audit Phase 3, not at creation time") and Audit
+> Lessons 23–24. Phase 3 calls `mint_dataset_snapshot()` for every dataset listed in
+> `dataset_ids_to_snapshot`.
 
 > **IMPORTANT:** `POST /entity/{id}/version` returns 405 for Dataset entities — do NOT use it.
 > Dataset entities are a subtype of EntityView and require the async table transaction endpoint.
@@ -378,7 +387,8 @@ def mint_dataset_snapshot(syn, dataset_id: str, label: str, comment: str) -> int
     raise RuntimeError(f"Unexpected snapshot response: {data}")
 
 
-# Usage — determine next available label before calling:
+# Usage (in apply_audit_fixes.py / Phase 3, NOT create_project.py) —
+# determine next available label before calling:
 versions = syn.restGET(f'/entity/{dataset_id}/version')
 existing = [v.get('versionLabel', '') for v in versions.get('results', [])]
 existing_nums = [v.get('versionNumber', 0) for v in versions.get('results', [])]
@@ -386,7 +396,7 @@ next_label = f'v{max(existing_nums, default=0) + 1}'
 
 snapshot_version = mint_dataset_snapshot(
     syn, dataset_id, label=next_label,
-    comment='Initial stable version from NADIA ingestion'
+    comment='Stable version after NADIA annotation review'
 )
 ```
 
@@ -397,7 +407,9 @@ snapshot_version = mint_dataset_snapshot(
 4. Apply annotations to Dataset entity
 5. Set columnIds on Dataset entity
 6. `bind_schema(syn, files_folder_id, schema_uri)` ← bind to FILES FOLDER
-7. Mint stable version of Dataset entity (Step 6 above)
+7. Do **NOT** mint a stable version here. The Dataset is left unsnapshotted at creation;
+   audit Phase 3 (`apply_audit_fixes.py`) mints it after all annotation fixes are applied
+   (Step 6 above). Minting at creation would snapshot pre-annotation file versions.
 8. Print validation result
 
 ---
@@ -722,15 +734,23 @@ for child in syn.getChildren(files_folder_id, includeTypes=['file']):
     name_lower = re.sub(r'\.(gz|zip|bz2)$', '', child['name'].lower())
     f.annotations['fileFormat'] = name_lower.rsplit('.', 1)[-1]
 
-    # specimenID / individualID: parse from filename prefix or sample map
+    # specimenID / individualID: use the biological sample ID, never a run accession.
+    # SRR/ERR/DRR identify sequencing runs, not biological individuals (see the
+    # "Per-sample identifier fields" note below). Only the sample_map (which holds
+    # biological specimen/individual IDs keyed by the file's token) or a non-run token
+    # such as a GSM ID may be used here.
     m = re.match(r'([A-Z]+\d+)[_.]', child['name'])
-    sample_id = m.group(1) if m else None
-    if sample_id and sample_id in sample_map:
-        f.annotations['specimenID'] = sample_id
-        f.annotations['individualID'] = sample_map[sample_id].get('individualID', sample_id)
-    elif sample_id:
-        f.annotations['specimenID'] = sample_id
-        f.annotations['individualID'] = sample_id
+    file_token = m.group(1) if m else None
+    is_run_accession = bool(file_token and re.match(r'^(SRR|ERR|DRR)\d+$', file_token))
+    if file_token and file_token in sample_map:
+        f.annotations['specimenID'] = sample_map[file_token].get('specimenID', file_token)
+        f.annotations['individualID'] = sample_map[file_token].get('individualID', file_token)
+    elif file_token and not is_run_accession:
+        f.annotations['specimenID'] = file_token
+        f.annotations['individualID'] = file_token
+    # If only a run accession is available and it is not in sample_map, leave these
+    # unset — Step 7b gap-fill resolves the biological ID from sample_title /
+    # sample_alias / BioSample (SAMN/SAME/SAMD). Never store a run accession here.
 
     syn.store(f)
 ```
@@ -1960,7 +1980,9 @@ for proj in created:
                 # columnIds — rebuild from actual file annotations
                 HIGH_CARDINALITY_AUDIT = {'specimenID', 'individualID', 'externalAccessionID',
                                           'name', 'id', 'sampleId', 'runAccession', 'biosampleId'}
-                EXCLUDE_COLS_AUDIT = {'resourceStatus', 'filename'}
+                # 'name' must be excluded here too — like 'filename' it duplicates the
+                # Synapse system 'name' column and produces a broken column in Dataset views.
+                EXCLUDE_COLS_AUDIT = {'resourceStatus', 'filename', 'name'}
 
                 # Collect annotation keys from files
                 all_ann_audit = {}
@@ -2343,14 +2365,17 @@ for proj_fix in fixes:
                 (f'v{n}' for n in range(1, 100) if f'v{n}' not in existing_labels),
                 'v-post-audit'
             )
-            # Mint stable version with all annotation fixes reflected
-            snap = syn.restPOST(
-                f'/entity/{dataset_id}/version',
-                json.dumps({'label': next_label,
-                            'comment': 'Stable version after NADIA annotation review'})
+            # Mint stable version with all annotation fixes reflected.
+            # Dataset entities return 405 on POST /entity/{id}/version — they require the
+            # async table-transaction snapshot endpoint. Use mint_dataset_snapshot() (defined
+            # under "Mint a stable snapshot version of the Dataset" earlier in this file);
+            # apply_audit_fixes.py must include that helper. Do NOT POST to /entity/{id}/version.
+            snap_version = mint_dataset_snapshot(
+                syn, dataset_id, label=next_label,
+                comment='Stable version after NADIA annotation review'
             )
             print(f"  Dataset {dataset_id}: stable version minted → {next_label} "
-                  f"(v{snap.get('versionNumber', '?')})")
+                  f"(v{snap_version})")
         except Exception as e:
             print(f"  Dataset {dataset_id} snapshot failed: {e}")
 

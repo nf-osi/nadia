@@ -209,7 +209,7 @@ The audit script (code in `prompts/synapse_workflow.md`):
   - `resourceType` missing → `experimentalData`
   - `externalAccessionID`/`externalRepository`/`study` missing → set from known metadata
   - `dataSubtype` missing → infer from file extension (`raw` for fastq/bam/vcf, `processed` otherwise)
-  - `specimenID`/`individualID` parseable from filename (GSM/SRR/ERR prefix) → set
+  - `specimenID`/`individualID` parseable from filename → set from the biological sample ID only (GSM or a study sample token). **Never set these from a run accession (SRR/ERR/DRR)** — those identify sequencing runs, not biological individuals (CLAUDE.md Standard 5). If only a run accession is available, leave them for Phase 2 to resolve from `sample_title`/`sample_alias`/BioSample.
   - Schema binding missing → bind the schema
   - `resourceStatus` or `filename` annotations on File entities → remove
   - Source Metadata/ folder is empty → flag for Phase 2 population

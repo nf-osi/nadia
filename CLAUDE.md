@@ -14,9 +14,12 @@ Your job is to run daily, discover publicly available disease-relevant research 
 
 **Rule 1 — The portal tables are read-only, always.**
 These Synapse tables are the live data portal. You may query them with SELECT statements only. Never call `syn.store()`, `syn.delete()`, or any mutation on these IDs (read from `config/settings.yaml` → `deduplication`):
-- `studies_table_id` — studies table
-- `files_table_id` — files table
-- `datasets_table_id` — datasets table
+- `studies_table_id` — studies MaterializedView (read-only; fed by `studies_source_view_id`)
+- `files_table_id` — files FileView
+- `publications_table_id` — portal publications table
+- `dataset_collection_id` — portal Dataset Collection entity
+
+(There is no `datasets_table_id` — that entity was removed; see the note in `config/settings.yaml` → `deduplication`. Do not query it.)
 
 **Rule 2 — Only write to entities you created in the current run, or to the agent's own state tables, or when explicitly adding a dataset to an existing agent-created project (status = synapse_created or pending_dataset_add).**
 Your write scope: (a) new Synapse projects you create this run, (b) the two state tables under `STATE_PROJECT_ID`, (c) adding new dataset folders to existing projects that the agent itself previously created (identified by `synapse_project_id` in the state table).
@@ -582,7 +585,7 @@ The schema tells you:
 
 > **Dataset column order is: `id` | `name` | annotation columns.** Create `{'name': 'id', 'columnType': 'ENTITYID'}` and `{'name': 'name', 'columnType': 'STRING', 'maximumSize': 256}` via `POST /column` and prepend their IDs to `columnIds` before all annotation column IDs. Without system columns first, the Dataset view shows no identifier or filename.
 
-> **Stable Dataset versions must be minted in audit Phase 3, not at creation time.** Every project's entry in `audit_reasoning_fixes.json` must include `dataset_ids_to_snapshot` with ALL dataset IDs from that project — even projects with no annotation gaps. Phase 3 (`apply_audit_fixes.py`) mints the version only for datasets listed there. A dataset without a stable version cannot be reliably cited.
+> **Stable Dataset versions must be minted in audit Phase 3, not at creation time.** Every project's entry in `audit_reasoning_fixes.json` must include `dataset_ids_to_snapshot` — a list of `{"dataset_id": "synXXX"}` objects for ALL datasets in that project — even projects with no annotation gaps. Phase 3 (`apply_audit_fixes.py`) mints the version only for datasets listed there, and it must mint via the async table-transaction snapshot helper (`mint_dataset_snapshot()`), never `POST /entity/{id}/version` (which 405s on Dataset entities). A dataset without a stable version cannot be reliably cited.
 
 **Only set enum values that exist in the schema** — fetch at runtime from `https://repo-prod.prod.sagebase.org/repo/v1/schema/type/registered/{schema_uri}`.
 

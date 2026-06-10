@@ -79,10 +79,15 @@ Fields that apply uniformly across all files in the study: funding agency, study
 
 **Source priority:**
 1. PubMed full record — GrantList (funding), AuthorList (leads), AffiliationInfo (institutions)
-2. CrossRef API for the DOI — funder info, author affiliations
-3. Repository project metadata — ENA study XML, GEO series, PRIDE project
-4. Paper abstract / title — data type, assay category
-5. BioStudies record (for ENA/ArrayExpress submissions) — can have `principal investigator` role explicitly tagged
+2. For `fundingAgency` when the GrantList is empty: **PMC full-text Acknowledgements section is mandatory** (`fetch_pmc_methods`/full text — scan for "funded by", "supported by", grant numbers, agency/foundation names: NIH, NSF, ERC, Wellcome, CTF, etc.) before any placeholder fallback. Per CLAUDE.md Standard 11, "Unknown funding" from a paper in open-access PMC is not acceptable.
+3. CrossRef API for the DOI — funder info, author affiliations
+4. Repository project metadata — ENA study XML, GEO series, PRIDE project
+5. Paper abstract / title — data type, assay category
+6. BioStudies record (for ENA/ArrayExpress submissions) — can have `principal investigator` role explicitly tagged
+
+> **Name format:** study leads / investigators must be written as `Firstname [Middle] Lastname`
+> (combine PubMed `<ForeName>` + `<LastName>`), never `Lastname, Firstname` or `Lastname F`.
+> Reformat GEO/BioStudies `Lastname SP`-style names before storing.
 
 ### Category D — Identifier fields (per-file, must be unique)
 Schema fields that capture specimen identity, individual identity, aliquot identity, sample IDs, BioSample accessions, or external accession IDs. Identify these at runtime by checking `fetch_schema_properties()` — field descriptions will indicate they capture per-sample biological or external identifiers.
@@ -704,12 +709,14 @@ def validate_against_enum(raw_value: str, field_props: dict) -> str | None:
         if str(entry).lower() == raw_norm:
             return str(entry)   # return exact enum case
 
-    # 2. Substring / prefix match for common abbreviations
-    for entry in enum_list:
-        if raw_norm in str(entry).lower() or str(entry).lower() in raw_norm:
-            return str(entry)
+    # NOTE: Do NOT do loose substring/prefix matching against the enum. It silently
+    # produces wrong values — "male" is a substring of "female" (flips sex), "RNA-seq"
+    # is a substring of "single-cell RNA-seq" (loses assay specificity), and a generic
+    # "Illumina" matches "Illumina HiSeq 2500" (loses instrument specificity). Enums are
+    # ground truth and must match exactly; only the curated, enum-membership-guarded
+    # synonym map below is allowed as a fallback.
 
-    # 3. Domain-specific synonyms — built at runtime from the schema's actual enum values.
+    # 2. Domain-specific synonyms — built at runtime from the schema's actual enum values.
     # Do not hardcode schema-specific enum strings here. Instead, after calling
     # fetch_schema_properties(), inspect each enum list and build a synonym map for that
     # field based on common abbreviations of the values present.
@@ -723,8 +730,10 @@ def validate_against_enum(raw_value: str, field_props: dict) -> str | None:
         'rattus norvegicus': 'Rattus norvegicus',
         'rat': 'Rattus norvegicus',
         'female': 'Female', 'f': 'Female', 'male': 'Male', 'm': 'Male',
-        'unknown': 'Unknown', 'not reported': 'Unknown',
-        'n/a': 'Unknown', 'na': 'Unknown', 'not applicable': 'Unknown',
+        'unknown': 'Unknown', 'not reported': 'Unknown', 'n/a': 'Unknown',
+        # Do NOT map 'not applicable' to 'Unknown' — they are distinct concepts. Many
+        # schemas have a real 'Not Applicable' enum value (e.g. tumorType on normal/control
+        # samples, per CLAUDE.md Standard 12); let exact match resolve it.
         'paired': 'Paired', 'paired-end': 'Paired',
         'single': 'Single', 'single-end': 'Single',
         'fresh frozen': 'Fresh Frozen', 'ffpe': 'FFPE',

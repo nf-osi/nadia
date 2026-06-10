@@ -91,15 +91,21 @@ Each discovered publication becomes one Synapse project:
 
 ```
 ├── CLAUDE.md              Agent instructions (loaded by Claude Code at runtime)
+├── config/
+│   ├── settings.yaml      Runtime configuration (identity, Synapse, schema, checklist)
+│   ├── keywords.yaml      Disease domain search terms and PubMed MeSH query
+│   └── nf_keywords.yaml   Legacy NF/SWN search terms (superseded by keywords.yaml)
 ├── lib/
 │   ├── synapse_login.py   Synapse authentication helper
 │   ├── state_bootstrap.py Creates/retrieves agent state tables in Synapse
-│   ├── keywords.yaml      Disease domain search terms and PubMed MeSH query
-│   ├── nf_keywords.yaml   Legacy NF/SWN search terms (superseded by keywords.yaml)
-│   └── settings.yaml      Runtime configuration
+│   └── requirements.txt   Python dependencies
 ├── prompts/
-│   └── daily_task_template.md  Task prompt for scheduled runs
-├── config/                Environment-specific configuration
+│   ├── daily_task_template.md  Orchestration prompt for scheduled runs (Steps 1–9)
+│   ├── repo_apis.md            Repository file-enumeration implementations
+│   ├── synapse_workflow.md     Synapse entity creation, annotation, audit phases
+│   └── annotation_gap_fill.md  Four-tier source-exhaustion algorithm for annotations
+├── scripts/               Helper scripts (github_issue.py, provisioning, status, prep)
+├── .github/workflows/     Scheduled + event-driven GitHub Actions
 └── tests/                 Unit tests
 ```
 
