@@ -1439,11 +1439,12 @@ Validation warnings are expected at this stage — some required fields can only
 
 ## Self-Audit and Remediation
 
-Run this after Step 6 (project creation) and before JIRA notifications. The audit is three phases:
+Run this after Step 6 (project creation) and before any GitHub review issue is filed. It is the single gate that makes the project publication-ready on the first pass — there is no later polish run. The audit is four phases:
 
 - **Phase 1 (`audit.py`)** — Python script: mechanical checks + immediate auto-fixes for anything that requires no reasoning; collects context for reasoning-required gaps
 - **Phase 2 (agent reasoning)** — Read the audit output; reason through missing annotation values using available context; write `audit_reasoning_fixes.json`
-- **Phase 3 (`apply_audit_fixes.py`)** — Python script: apply all reasoned fixes to Synapse
+- **Phase 3 (`apply_audit_fixes.py`)** — Python script: apply all reasoned fixes to Synapse, then mint stable Dataset versions
+- **Phase 4 (`verify.py`)** — Python script: re-read stored Synapse state and assert every gold-standard checklist item. Projects that pass become approve-ready review issues; projects that cannot be made to pass are held as `audit_failed` and flagged BLOCKED. This is the read-back gate that eliminates the silent defects which used to require a human fix loop.
 
 ### Audit Lessons from Live Testing
 
@@ -1493,7 +1494,7 @@ These issues were discovered when the audit was run on real agent-created projec
 
     Examples of **sufficient** names: `"RNA-seq — peripheral blood mononuclear cells, treatment vs. control (GEO GSE120686)"`, `"ChIP-seq H3K27ac — Schwann cells (ENA PRJEB12345)"`, `"Whole exome sequencing — patient-derived xenograft lines (SRA SRP123456)"`
 
-17. **Mint a stable Dataset version after all annotations are final** — After creating or updating a Dataset and confirming all annotations are correct, use `mint_dataset_snapshot()` (see Step 6 above) to mint a permanent snapshot via the async table transaction endpoint. **Do not use `syn.restPOST('/entity/{id}/version', ...)` — that endpoint returns 405 for Dataset entities.** Data managers will request this explicitly if it is missing. The polish workflow (Step 7) and the daily creation workflow both must mint versions as a final step after annotations are confirmed.
+17. **Mint a stable Dataset version after all annotations are final** — After creating or updating a Dataset and confirming all annotations are correct, use `mint_dataset_snapshot()` (see Step 6 above) to mint a permanent snapshot via the async table transaction endpoint. **Do not use `syn.restPOST('/entity/{id}/version', ...)` — that endpoint returns 405 for Dataset entities.** The daily creation workflow must mint versions as a final step after annotations are confirmed (Phase 3), then verify the minted version in the Phase 4 read-back gate. There is no separate polish run.
 
 18. **Sample-varying fields set to a single study-level value on all files** — After initial annotation, check whether any field that can vary by sample (genotype, condition, sex, age, tissue, cell type, preparation method, or any treatment/perturbation field) has the same value on every file in the dataset. If the study has multiple experimental groups, this is almost always wrong — the study-level value was copied to all files instead of mapping each file to its source sample. Fix by: (a) fetching the per-sample metadata record for each file's run/sample accession, (b) mapping each file to its sample, (c) re-applying those fields per-file with the correct per-sample value. This is the second thing to check in the audit after mechanical field presence — it is a correctness error, not just a completeness gap. → Standard 5
 
@@ -2354,6 +2355,141 @@ for proj_fix in fixes:
 
 print(f"\nApply complete: {total_projects} projects, {total_files} files updated.")
 ```
+
+---
+
+### Phase 4 — Read-back Verification (`verify.py`)
+
+Phases 1–3 *apply* fixes. Phase 4 *proves* they landed by re-reading the stored Synapse state and asserting every gold-standard checklist item. It is the gate that lets the first pass be publication-ready: a project only becomes an approve-ready review issue if it passes here. This phase catches the silent defects curators have historically had to fix by hand — fixes the audit reported as applied but which never actually took effect (missing system columns, forbidden file annotations, unminted versions).
+
+**Principle: every assertion reads freshly from Synapse (`syn.restGET` / `syn.get`), never from an in-memory dict built earlier in the run.** The whole point is to detect divergence between what the code thinks it did and what is actually stored.
+
+```python
+import re
+
+VALID_PREFIXES = {  # bioregistry allowlist — see CLAUDE.md alternateDataRepository table
+    'geo','insdc.sra','bioproject','dbgap','ega.study','ega.dataset','arrayexpress',
+    'pride.project','massive','metabolights','cellxgene.collection','zenodo.record','osf',
+    'pdc.study','cbioportal','dryad','scidb','tib','cil','gdc','tcia.collection','doi',
+}
+FORBIDDEN_FILE_KEYS = {'resourceStatus', 'filename', 'name'}
+RUN_ACCESSION = re.compile(r'^[SED]RR\d+$')
+COMPRESSION_SUFFIX = re.compile(r'\.(gz|bz2|zip|xz)$', re.I)
+
+def prefix_ok(entry: str) -> bool:
+    if ':' not in entry:
+        return False
+    prefix, acc = entry.split(':', 1)
+    if prefix not in VALID_PREFIXES:
+        return False
+    # shape rules: BioProject IDs must use bioproject:, never insdc.sra:
+    if prefix == 'insdc.sra' and re.match(r'^PRJ', acc):
+        return False
+    return True
+
+def name_format_ok(lead: str) -> bool:
+    # reject "Lastname F", "Lastname, Firstname", initials-only
+    if ',' in lead:
+        return False
+    toks = lead.split()
+    if len(toks) < 2:
+        return False
+    if re.fullmatch(r'[A-Z]{1,3}', toks[-1]):  # trailing initials block e.g. "Smith JP"
+        return False
+    return True
+
+def verify_project(syn, proj, schema_props_by_folder, required_proj_annos, has_grantlist):
+    """proj: dict with project_id, datasets[], pmid, doi. Returns list of failure dicts."""
+    fails = []
+    F = lambda check, eid, detail: fails.append({'check': check, 'entity_id': eid, 'detail': detail})
+    pid = proj['project_id']
+
+    pa = syn.restGET(f'/entity/{pid}/annotations2').get('annotations', {})
+    val = lambda d, k: (d.get(k, {}) or {}).get('value', [])
+    for field in required_proj_annos:
+        if not val(pa, field):
+            F('project_annotation_missing', pid, field)
+    if val(pa, 'studyStatus') != ['Completed']:
+        F('studyStatus_not_completed', pid, val(pa, 'studyStatus'))
+    if val(pa, 'resourceStatus') != ['pendingReview']:
+        F('resourceStatus_wrong', pid, val(pa, 'resourceStatus'))
+    if proj.get('pmid') and not val(pa, 'pmid'):
+        F('pmid_missing', pid, '')
+    if proj.get('doi') and not val(pa, 'doi'):
+        F('doi_missing', pid, '')
+    if has_grantlist and val(pa, 'fundingAgency') in (['Not Applicable (External Study)'], []):
+        F('funding_placeholder_with_grantlist', pid, val(pa, 'fundingAgency'))
+    for lead in val(pa, 'studyLeads'):
+        if not name_format_ok(lead):
+            F('studylead_format', pid, lead)
+    for entry in val(pa, 'alternateDataRepository'):
+        if not prefix_ok(entry):
+            F('bad_accession_prefix', pid, entry)
+
+    for ds in proj['datasets']:
+        did = ds['dataset_id']
+        d = syn.restGET(f'/entity/{did}')
+        if d.get('parentId') != pid:
+            F('dataset_not_root_child', did, d.get('parentId'))
+        cols = [syn.restGET(f'/column/{c}') for c in d.get('columnIds', [])]
+        if not (len(cols) >= 2 and cols[0]['columnType'] == 'ENTITYID'
+                and cols[1]['name'] == 'name' and cols[1]['columnType'] == 'STRING'):
+            F('dataset_system_columns_missing', did,
+              [(c['name'], c['columnType']) for c in cols[:2]])
+        if not d.get('items'):
+            F('dataset_items_empty', did, '')
+        versions = syn.restGET(f'/entity/{did}/version')['results']
+        if len(versions) < 2 and all(v.get('isLatestVersion') for v in versions):
+            F('dataset_version_not_minted', did, '')
+        if re.fullmatch(r'[A-Za-z]+_[A-Z]+\d+', d.get('name', '')):
+            F('dataset_name_not_descriptive', did, d.get('name'))
+
+        # files: schema bound + per-file assertions
+        folder_id = ds['files_folder_id']
+        bound = syn.restGET(f'/entity/{folder_id}/schema/binding')  # 404 → not bound
+        if not bound:
+            F('schema_not_bound', folder_id, '')
+        schema_props = schema_props_by_folder.get(folder_id, set())
+
+        file_entities = list(syn.getChildren(folder_id, includeTypes=['file']))
+        if len(file_entities) == 1 and is_landing_page(file_entities[0]):
+            F('landing_page_only', folder_id, file_entities[0]['name'])
+        per_field_values = {}
+        for fe in file_entities:
+            fid = fe['id']
+            fa = syn.restGET(f'/entity/{fid}/annotations2').get('annotations', {})
+            keys = set(fa.keys())
+            if not keys:
+                F('file_zero_annotations', fid, '')
+            for bad in FORBIDDEN_FILE_KEYS & keys:
+                F('forbidden_file_annotation', fid, bad)
+            for stray in keys - schema_props - {'comments'}:
+                F('non_schema_file_key', fid, stray)
+            for ff in val(fa, 'fileFormat'):
+                if COMPRESSION_SUFFIX.search(ff):
+                    F('fileformat_has_compression_suffix', fid, ff)
+            for idf in ('specimenID', 'individualID'):
+                for v in val(fa, idf):
+                    if RUN_ACCESSION.match(str(v)):
+                        F('run_accession_as_id', fid, f'{idf}={v}')
+            # collect for uniformity check
+            for k in ('genotype', 'sex', 'age', 'tissue', 'cellType', 'condition', 'specimenID'):
+                if k in fa:
+                    per_field_values.setdefault(k, []).append(tuple(val(fa, k)))
+            # contentSize on external handle
+            if fe.get('dataFileHandleId') and not external_handle_has_size(syn, fe):
+                F('contentSize_missing', fid, '')
+        # Standard 5: multi-sample study must not have uniform sample-varying fields
+        if len(file_entities) > 1:
+            for k, vals in per_field_values.items():
+                if k in ('specimenID',) and len(set(vals)) != len(vals):
+                    F('specimenID_not_unique', did, k)
+                if k != 'specimenID' and len(set(vals)) == 1 and proj.get('multi_group'):
+                    F('sample_field_uniform', did, k)
+    return fails
+```
+
+Run `verify_project` for every project created/updated this run. For each failure, attempt **one** targeted remediation (re-run the specific Phase 1/3 fix — e.g. rebuild `columnIds`, strip the forbidden key, re-mint the version, re-derive per-sample values) and re-assert just that item. Write `audit_verification.json` keyed by project_id with `{passed, failures}`. A project with zero remaining blocking failures → `synapse_created`/`dataset_added`; otherwise → `audit_failed`, carried to Step 8 as a `[NADIA BLOCKED]` issue. A healthy run produces zero `audit_failed` projects — recurring blocks in the same category are a Step 6 bug to fix at the source, not a permanent escape hatch.
 
 ---
 
