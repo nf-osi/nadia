@@ -149,9 +149,17 @@ For each accession found → fetch metadata from source repository
 
 SECONDARY PATH — repository-direct (catches unpublished / preprint data)
 ─────────────────────────────────────────────────────────
+GEO direct (esearch db=gds), SRA direct (esearch db=sra),
 Zenodo, Figshare, OSF, ArrayExpress, PRIDE, MetaboLights, Mendeley Data, NCI PDC,
 DataCite API, MassIVE, NCI GDC, Cell Image Library
   → query with keywords from config/keywords.yaml
+  → GEO/SRA direct is REQUIRED and runs first: the publication-first primary path
+    only finds GEO/SRA deposits that have a linked, NCBI-elinked publication. Most
+    deposits arrive before the paper (or the GEO record never cites the PMID), so a
+    direct keyword search of db=gds/db=sra is the only way to surface them. For each
+    GEO/SRA hit, read PubMedIds — if set and already found via elink, do not duplicate;
+    if empty, resolve the publication (title/bioRxiv search) before falling back to the
+    repository title.
   → SKIP any result with a PMID already found in the primary path
   → For Figshare: after fetching results, group articles by resource_doi.
     Multiple Figshare articles sharing the same resource_doi (publication DOI)

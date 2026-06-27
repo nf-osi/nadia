@@ -96,6 +96,18 @@ Write and run `{WORKSPACE_DIR}/discover_secondary.py`.
 Query these repositories with keywords from `config/keywords.yaml` (`search_terms`) for datasets published since `{{LOOKBACK_DATE}}`. For each result, check if it has a PMID or DOI that was already found in the primary path — if so, skip it (it's already covered). Only keep datasets with no associated publication yet.
 
 Repositories to query:
+- **GEO direct** (`esearch db=gds`) — **REQUIRED, query first.** Most NF -omics data is deposited to GEO *before* a publication exists, or with a GEO record that never cites the PMID — so the primary-path `elink(pubmed→gds)` never surfaces it. A direct GEO keyword search is the only way to catch these. Query:
+  ```python
+  # geo_terms: OR-join of config/keywords.yaml search_terms, each as [All Fields]
+  q = f'({geo_terms}) AND ("{LOOKBACK_DATE}"[PDAT] : "3000"[PDAT]) AND gse[ETYP]'
+  handle = Entrez.esearch(db='gds', term=q, retmax=200)
+  gds_uids = Entrez.read(handle)['IdList']
+  # esummary db=gds → accession (GSE...), n_samples, PubMedIds, title, taxon
+  ```
+  For each GSE: read its `PubMedIds` field. If non-empty, resolve the paper (treat as a primary-path group keyed by that PMID — do NOT create a duplicate if the PMID was already found via elink). If `PubMedIds` is empty, create a `pmid: null` group, then attempt publication resolution per CLAUDE.md "Before Creating Any Project" (title search, bioRxiv) before falling back to the GEO record title.
+- **SRA direct** (`esearch db=sra`) — **REQUIRED, query second.** Same rationale for sequencing data deposited without a linked publication. Query `db=sra` with the keyword terms + `("{LOOKBACK_DATE}"[PDAT] : "3000"[PDAT])`, resolve run/study accessions via runinfo, and dedup against PMIDs/accessions already found. Check the SRA study's BioProject for a linked GEO accession to avoid creating a duplicate of a GEO-direct hit.
+
+  **Dedup for GEO/SRA-direct hits (do this before scoring):** for every GSE/SRP accession, (1) skip if its PMID was already found in the primary path, (2) skip if the accession is already in the agent state table (`{state_table_prefix}_ProcessedStudies`), (3) skip if it is already in the portal `alternateDataRepository`. Apply the existing three-outcome classifier (SKIP/ADD/NEW) the same as any other candidate.
 - Zenodo (`https://zenodo.org/api/records`) — search `resource_type.type:dataset`
 - Figshare (`https://api.figshare.com/v2/articles/search`) — `item_type=3`
 - OSF (`https://api.osf.io/v2/nodes/`) — public projects
@@ -111,6 +123,7 @@ Repositories to query:
 For unpublished results, create publication groups with `pmid: null`, using the repository title as the publication title.
 
 Print: `Secondary discovery: N additional datasets (no associated publication)`
+Print the GEO/SRA-direct contribution separately: `GEO-direct: N series found, M new after dedup | SRA-direct: N studies found, M new after dedup` — these two sources are the primary remedy for the publication-first path missing unpublished GEO/SRA deposits, so surface them explicitly in the run summary.
 
 ---
 
