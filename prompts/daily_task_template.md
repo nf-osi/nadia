@@ -193,13 +193,29 @@ For each approved group (max 50 write operations total):
 Save `{WORKSPACE_DIR}/created_projects.json` with the full schema defined in `prompts/synapse_workflow.md` (project_id, project_name, pmid, doi, abstract, outcome, datasets[]).
 Print each action: `Created: "Project Name" (synXXX) — N datasets, M files`
 
+**Apply these deterministic derivations AT CREATION — they are the most frequent curator corrections and every one is computable from data you already fetch. Getting them right here (not in Phase 2) is what makes the first pass publication-ready:**
+
+- **Author names** → `f"{ForeName} {LastName}"` from PubMed `<ForeName>`/`<LastName>` (never `Initials`, never `Lastname, F`). `studyLeads` = first author **and** last/corresponding author — never collapse to one when they differ. (Standard 3)
+- **`alternateDataRepository` prefixes** → map by accession shape, not discovery path: `PRJNA*`/`PRJEB*` → `bioproject:`; `SRP*`/`ERP*`/`SRR*`/`ERR*` → `insdc.sra:`; `GSE*` → `geo:`. Never emit `insdc.sra:PRJ*`. Validate each against the bioregistry allowlist in CLAUDE.md.
+- **Cross-repo sibling accessions** → parse GEO `!Series_relation` (and the SRA study's BioProject) and add every linked SRA/BioProject/PRIDE accession, not just the one you discovered through. (Standards 8, 19)
+- **Per-sample annotations** → fetch each file's own sample record (ENA filereport per BioSample, GEO GSM characteristics) and set biological/technical fields per file at creation. Do not copy a single study-level value to all files. `specimenID`/`individualID` come from the BioSample/sample alias, never the run accession. (Standard 5)
+- **`doi`** → the publication DOI from PubMed `ArticleIdList`; dataset/collection DOIs (e.g. TCIA, Zenodo) belong only in `alternateDataRepository`, never as the project `doi`.
+- **`fundingAgency`** → from the PubMed GrantList; if empty and the paper is in open-access PMC, parse the Acknowledgements (Standard 11 Tier 2) before using the placeholder.
+- **Schema template** → choose from the verified `library_strategy`/`library_source`, never the paper title. (Standard 12)
+- **Dataset name** → descriptive `{assay} — {context} ({repo} {accession})`, never a bare `{Repo}_{Accession}`.
+- **Never set on File entities:** `resourceStatus`, `filename`, a custom `name`, or any key not in the bound schema's properties. (Standards 18, plus the "NEVER set on File entities" block in CLAUDE.md)
+
+Phase 2 (7b) re-verifies these through the Tier 1→4 source hierarchy, but it should be confirming correct values — not routinely correcting them. If Phase 2 finds it is correcting the same deterministic field run after run, that is a Step 6 bug to fix, not a Phase 2 responsibility.
+
 ---
 
-## Step 7 — Self-Audit and Remediation
+## Step 7 — Self-Audit, Remediation, and Publication-Ready Gate
 
-**Read `prompts/synapse_workflow.md` for the full implementation of all three audit phases.**
+**Read `prompts/synapse_workflow.md` for the full implementation of all audit phases.**
 
-This step checks every project created in Step 6 against the completion checklist and fixes any issues found. Run it in three sub-steps:
+**This step is the single authoritative gate that makes each project publication-ready on the first pass.** There is no later "polish" run — everything required to meet the gold-standard project bar (every item in the CLAUDE.md Project Completion Checklist) must be achieved and *verified* here, before any review issue is filed in Step 8. The objective is exactly one human loop: a data manager reviews and approves. A project that cannot be made to pass the read-back verification gate (7d) is held back as `audit_failed` and its issue is flagged BLOCKED rather than presented as approve-ready — it is never the human's job to do the curation NADIA skipped.
+
+Run it in four sub-steps: Phase 1 mechanical auto-fix (7a), Phase 2 reasoning gap-fill (7b), Phase 3 apply + mint (7c), and Phase 4 read-back verification gate (7d). Then post the curation comment (7e).
 
 ### 7a — Write and run `{WORKSPACE_DIR}/audit.py` (Phase 1)
 
@@ -306,7 +322,38 @@ Warnings remaining: N
 ========================
 ```
 
-### 7d — Post curation comments on GitHub issues
+### 7d — Read-back verification gate (Phase 4) — REQUIRED before any issue is filed
+
+**Read `prompts/synapse_workflow.md` → "Phase 4 — Read-back Verification" for the full implementation.**
+
+Phases 1–3 *apply* fixes; Phase 4 *proves* they took effect by re-reading the stored Synapse state fresh (a new `GET` per entity — never trust in-memory values or the build step's claims). This phase exists because curators have repeatedly found defects that the audit reported as fixed but which never actually landed (missing system columns, forbidden file annotations, unminted versions). Those silent defects are the reason iteration was needed; the gate eliminates them.
+
+Write and run `{WORKSPACE_DIR}/verify.py`. For every project created/updated this run, re-fetch the project, each Dataset, the files folder, and a sample of File entities, and assert each gold-standard item. Each assertion reads **stored** state:
+
+**Project (blocking):** all `curation_checklist.required_project_annotations` present; `studyStatus == Completed`; `resourceStatus == pendingReview`; `pmid`/`doi` set when known; `fundingAgency` is not the placeholder when a PMID with a populated GrantList exists; `studyLeads` match `Firstname [Middle] Lastname` form (reject `Lastname F`, `Lastname, Firstname`, or a single-author list when the paper has a distinct corresponding author); every `alternateDataRepository` entry uses a valid bioregistry prefix from the allowlist (PRJNA/PRJEB → `bioproject`, SRP/ERP/SRR/ERR → `insdc.sra`, never `insdc.sra:PRJ*`).
+
+**Dataset (blocking):** entity is a direct child of the project root; `columnIds` begins with a system `id` (ENTITYID) column then a system `name` (STRING) column, then annotation columns; `items` is non-empty; a stable version exists whose label is ≥ the highest pre-existing label and whose item file versions are current; dataset name is descriptive (not a bare `{Repo}_{Accession}`).
+
+**Files (blocking):** schema is bound to the files folder and matches the data modality; no File entity has zero annotations; **no File entity carries `resourceStatus`, `filename`, or a custom `name` annotation**; **every File annotation key exists in the bound schema's properties** (reject stray keys such as `externalAccessionID`, `externalRepository`, `study`); `fileFormat` carries no compression suffix; `contentSize` is set on external File handles; for any sample-varying biological field (genotype, condition, sex, age, tissue, cell type, specimenID/individualID) in a multi-sample study, values are **not uniform across all files** and identifier fields are unique per file and are not run accessions (SRR/ERR/DRR).
+
+**Structure (blocking):** no empty folders; no files folder is a landing-page-only fallback (single ExternalLink with no enumerable files → Standard 13 violation).
+
+For every failed assertion: attempt one automated remediation cycle (re-run the relevant Phase 1/3 fix for that specific failure), then re-verify that item. Write `{WORKSPACE_DIR}/audit_verification.json`: `{project_id: {passed: bool, failures: [{check, entity_id, detail}]}}`.
+
+- A project with **zero** remaining blocking failures → `status = synapse_created` (or `dataset_added`); it goes to Step 8 as a normal approve-ready review.
+- A project with remaining blocking failures after the remediation cycle → `status = audit_failed`; record the failures in the state table and carry them into Step 8 so its issue is filed **flagged BLOCKED** (title prefix `[NADIA BLOCKED]`, body lists the failed checks). This is the rare escape hatch, not the norm — a healthy run produces zero `audit_failed` projects.
+
+Print:
+```
+=== Verification Gate (Phase 4) ===
+Projects verified:        N
+Passed (approve-ready):   N
+Blocked (audit_failed):   N
+Remediations applied:     N
+===================================
+```
+
+### 7e — Post curation comments on GitHub issues
 
 For each project that was created or updated in this run, post a comment on its GitHub study-review issue documenting what was done. The comment should include:
 - A summary of which annotation fields were set and the key values chosen
@@ -322,6 +369,10 @@ Use `scripts/github_issue.py`'s `post_issue_comment()` function. This is not opt
 ## Step 8 — GitHub Issue Notifications
 
 For each project created or updated in Step 6, a study-review GitHub issue must exist. Use `scripts/github_issue.py` (see CLAUDE.md for the calling pattern). Log all issue URLs before exit.
+
+**The issue's framing depends on the Phase 4 verification result (7d):**
+- Projects that **passed** the gate (`status = synapse_created` / `dataset_added`) → file the normal approve-ready `[NADIA Review]` issue. The intended human action is a single review-and-approve; the curation comment (7e) documents what was set, and there should be nothing left for the reviewer to fix.
+- Projects that were **blocked** (`status = audit_failed`) → file the issue with title prefix `[NADIA BLOCKED]` and the `audit-blocked` label, listing the failed checks from `audit_verification.json` under "Blocking failures NADIA could not self-resolve." Do not present a blocked project as approve-ready.
 
 If running in GitHub Actions, `GITHUB_TOKEN` and `GITHUB_REPOSITORY` are set automatically. On errors, log a warning and continue — do not abort the run.
 
