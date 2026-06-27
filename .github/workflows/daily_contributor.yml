@@ -13,6 +13,10 @@ on:
         description: 'PMID or dataset accession to process directly, skipping discovery (e.g. 12345678 or GSE123456 or PXD012345). Leave blank for normal discovery run.'
         required: false
         default: ''
+      state_project_id:
+        description: 'Override STATE_PROJECT_ID (e.g. a scratch state project for an isolated test run). Leave blank to use the repo default.'
+        required: false
+        default: ''
 
 jobs:
   contribute:
@@ -80,7 +84,7 @@ jobs:
           # GitHub token for filing study-review issues
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           GITHUB_REPOSITORY: ${{ github.repository }}
-          STATE_PROJECT_ID: ${{ vars.STATE_PROJECT_ID }}
+          STATE_PROJECT_ID: ${{ github.event.inputs.state_project_id || vars.STATE_PROJECT_ID }}
           # Provide repo root so agent scripts can find lib/
           AGENT_REPO_ROOT: ${{ github.workspace }}
 
