@@ -11,6 +11,16 @@
 #   source:    "fix" (human correction) | "confirmed" (human approved without changes)
 #   issues:    list of GitHub issue numbers that informed this rule
 #   added:     ISO date this entry was created or last updated
+#
+# Dream review log — auditable trail of weekly self-improvement runs.
+# A line is added every week, including weeks with no actionable signal,
+# so the absence of a change is distinguishable from a skipped run.
+#   2026-06-28: No actionable signal (0 fix commands, 0 status reports,
+#               0 zero-correction approvals, 0 vocabulary-gap comments).
+#               Only repo activity in-window was auto-generated review issue
+#               #314 (awaiting human review) and infrastructure agent-failure
+#               issues (#303-#313, auth/rate-limit/API) — neither is an
+#               annotation-quality signal. patterns: list left unchanged.
 
 patterns:
 
