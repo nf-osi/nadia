@@ -179,8 +179,8 @@ For each approved group (max 50 write operations total):
 3. For each dataset in the group:
    a. Create `{Repository}_{AccessionID}/` subfolder in `Raw Data/`
    b. Enumerate individual file download URLs from the source repository (see CLAUDE.md "How to Get Direct Download URLs Per Repository")
-   c. If ≤ 100 files and direct URLs available: create one `File` entity per file with `externalURL=<direct_download_url>`, `synapseStore=False`
-   d. If > 100 files or controlled access: create one `ExternalLink` to the landing page
+   c. **Create one `File` entity per individual file, with `externalURL=<direct_download_url>`, `synapseStore=False` — ALWAYS, regardless of file count.** There is no upper limit and no landing-page shortcut: a study with 500 or 1,200 files must get 500 or 1,200 File entities. A single landing-page link is never an acceptable substitute for a file list the repository actually exposes — it produces an unusable, un-annotatable dataset that a human then has to expand by hand (the exact rework this pipeline exists to eliminate). Set `contentSize` per file (Standard 21). For very large counts, batch the entity/file-handle creation, but enumerate the complete set.
+   d. A landing-page `ExternalLink` is permitted **only** when the files are genuinely non-enumerable — i.e. `get_file_list_*` returns empty because the data is controlled-access with no public manifest (EGA, dbGaP), or `.sra`-only with no ENA-mirrored FASTQ. In that case the Phase 4 gate will flag `landing_page_only` and the project is held as `audit_failed` with `file-enumeration-required` for human review. Never use the landing page merely because the count is high.
    e. Apply dataset-folder-level annotations (contentType=dataset, externalAccessionID, assay, species, etc.)
    f. Set provenance on each File/Link entity
 4. Apply project-level annotations (study, resourceType, resourceStatus=pendingReview, pmid, doi)
