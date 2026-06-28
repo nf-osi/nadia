@@ -112,6 +112,9 @@ curation_checklist:
     - resourceStatus      # expected: pendingReview
     - study               # project name
     - studyId             # Synapse project ID
+    - accessType          # PortalDataset enum: Open Access | Controlled Access | Public Access | Private
+    - license             # PortalDataset enum (CC-BY 4.0, CC0 1.0, ... , Public Domain, UNKNOWN)
+    - dataUseModifiers    # PortalDataset DUO term list (General Research Use, Publication Required, ...)
 
 
 notifications:

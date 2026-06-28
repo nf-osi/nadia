@@ -789,6 +789,9 @@ Read `curation_checklist.required_dataset_annotations` from config for the full 
 | Study / project link | Project name and Synapse project ID |
 | Publication title | Full title of the publication |
 | Study leads | List of investigators (first + corresponding author) |
+| Access type | `accessType` — `Open Access` for public repos (GEO/SRA/Zenodo/PRIDE/ArrayExpress), `Controlled Access` for dbGaP/EGA (see Standard 23) |
+| License | `license` — the data license, from the source repository when explicit, else `UNKNOWN` (see Standard 23) |
+| Data use modifiers | `dataUseModifiers` — DUO term list describing permitted use (see Standard 23) |
 
 ### 15 — Spatial transcriptomics deposits: one Dataset entity, not two
 
@@ -876,6 +879,29 @@ Key patterns to apply from supplementary clinical tables:
 - **NF1 patient cohort neurofibromas**: Benign tumors (neurofibromas, schwannomas) from patients in an NF1 or NF2 disease cohort should have `nf1Genotype = '+/-'` (for NF1) or `nf2Genotype = '+/-'` (for NF2) even if not explicitly stated per sample — germline heterozygosity is the defining feature of NF1/NF2 diagnosis.
 
 - **Tumor subtype distinctions from supplementary**: Supplementary tables frequently disambiguate vague terms. For example, "benign neurofibroma" in the title might be clarified per-sample as "cutaneous neurofibroma" vs. "plexiform neurofibroma" in Supplementary Table 2. Always apply the more specific classification.
+
+### 23 — License, Data Use Modifiers, and Access Type are required Dataset annotations
+
+Every Dataset entity must carry `accessType`, `license`, and `dataUseModifiers` — they tell portal consumers what they are legally permitted to do with the data, and are surfaced in the project wiki. These are **Dataset-entity** annotations (defined in the `PortalDataset` schema), not file-level. Use `fetch_schema_properties` on `org.synapse.nf-portaldataset` to get the exact current enums and match values character-for-character (Standard 22). Derive — do not guess — from the source repository, and **flag the choice in the GitHub curation comment** because these fields are legally meaningful (Standard 9: flag, don't silently drop).
+
+**`accessType`** (`Open Access` | `Controlled Access` | `Public Access` | `Private`):
+- Public, openly downloadable repositories (GEO, SRA/ENA public, Zenodo public, Figshare, Dryad, PRIDE, MetaboLights, ArrayExpress, TCIA) → `Open Access`.
+- dbGaP, EGA, or any deposit requiring an application / DAC approval → `Controlled Access`. Put the application requirement in `conditionsOfAccess`.
+
+**`license`** — derive from the actual repository, never assume:
+- **Zenodo / Figshare / Dryad / DataCite**: the API returns an explicit license (`metadata.license.id`, `license` field). Map it to the closest schema enum (e.g. `cc-by-4.0` → `CC-BY 4.0`, `cc0-1.0` → `CC0 1.0`, Dryad CC0 → `CC0 1.0`).
+- **TCIA**: per-collection license from the collection page — usually `CC-BY 3.0` or `CC-BY 4.0` (Standard 16).
+- **PRIDE**: ProteomeXchange data is `CC0 1.0` (Public Domain dedication) unless the project states otherwise.
+- **GEO / SRA / ENA / ArrayExpress**: these repositories do **not** attach a formal license to deposits. Use `UNKNOWN` (it is a valid enum value and the honest answer) unless the paper's data-availability statement names a specific license. Do not invent `CC-BY` for GEO data.
+- **dbGaP / EGA controlled**: `UNKNOWN` (governed by the DAC agreement, not an open license).
+
+**`dataUseModifiers`** (DUO term list) — describe permitted use:
+- Open public data with no stated restriction → `['General Research Use']`. Add `['Publication Required']` when the repository or paper asks that the data be cited (most journal-linked deposits).
+- Controlled-access disease cohorts (dbGaP/EGA): derive from the consent group / DUO codes in the study metadata — commonly some of `Health or Medical or Biomedical Research`, `Disease Specific Research`, `Ethics Approval Required`, `Publication Required`, `Collaboration Required`, `Non-Commercial Use Only`. When the consent is `General Research Use` (GRU) use that term.
+- Non-commercial licenses (`CC BY-NC*`) imply `['Non-Commercial Use Only']` — set it alongside `General Research Use`.
+- If the DUO cannot be determined from any source, set `['General Research Use']` for open data (most permissive accurate default) and explicitly flag it for human confirmation; never leave the field empty.
+
+Helper `derive_license_and_data_use(repo, source_metadata)` and the per-repository mapping live in `prompts/synapse_workflow.md` → "License and Data Use Derivation". Phase 4 verification (daily template 7d) treats missing `accessType`/`license`/`dataUseModifiers` as a blocking failure.
 
 ---
 
@@ -1121,6 +1147,7 @@ Before logging `synapse_created` or `dataset_added`, verify:
 - [ ] Dataset entity `items` populated with all File entity IDs
 - [ ] Dataset entity `columnIds` starts with system `id` (ENTITYID) and `name` (STRING) columns, then all annotation columns — data managers expect column order: id | name | annotations
 - [ ] All fields in `curation_checklist.required_dataset_annotations` set on the Dataset entity
+- [ ] `accessType`, `license`, and `dataUseModifiers` set with valid `PortalDataset` enum values, derived per Standard 23, and any approximations flagged in the curation comment
 - [ ] Stable version minted on Dataset entity via `POST /entity/{id}/version` **after all annotation fixes are applied** (Phase 3, not creation)
 - [ ] Metadata schema bound to the **files folder** (not the Dataset entity, not the project) via `bind_json_schema(schema_uri, files_folder_id)`
 - [ ] Schema binding verified

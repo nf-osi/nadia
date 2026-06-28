@@ -1069,9 +1069,13 @@ NF_PORTAL_STATEMENT = (
     '(http://www.nf.synapse.org, RRID:SCR_021683)."'
 )
 
-def build_data_access_section(accessions: list[str], citation_info: dict) -> str:
+def build_data_access_section(accessions: list[str], citation_info: dict, license_info: dict = None) -> str:
     """
     Build the ## Data Access and Citation wiki section.
+
+    license_info (optional): the dict returned by derive_license_and_data_use()
+    for the dataset(s). When provided, a "Data License and Use" block is prepended
+    so the wiki surfaces accessType, license, and dataUseModifiers (Standard 23).
 
     The content between NADIA-ACK markers is written as HTML — the portal's
     acknowledgementStatements field renders HTML, so use <p>, <a>, <blockquote>
@@ -1097,6 +1101,22 @@ def build_data_access_section(accessions: list[str], citation_info: dict) -> str
     repo_name    = citation_info.get('repo_name', '')
 
     ack_parts = []
+
+    # Data License and Use block — surfaces the Dataset annotations in the wiki (Standard 23)
+    if license_info:
+        access = html_mod.escape(license_info.get('accessType', '') or 'Unknown')
+        lic    = html_mod.escape(license_info.get('license', '') or 'UNKNOWN')
+        duo    = license_info.get('dataUseModifiers') or []
+        cond   = html_mod.escape(license_info.get('conditionsOfAccess', '') or '')
+        duo_html = ', '.join(html_mod.escape(d) for d in duo) if duo else 'Not specified'
+        lic_lines = (
+            f'<p><b>Access type:</b> {access}<br/>'
+            f'<b>License:</b> {lic}<br/>'
+            f'<b>Data use modifiers (DUO):</b> {duo_html}</p>'
+        )
+        if cond:
+            lic_lines += f'<p><b>Conditions of access:</b> {cond}</p>'
+        ack_parts.append(lic_lines)
 
     if citation:
         # Append linked DOI at end of citation if url provided, else plain citation
@@ -1133,6 +1153,103 @@ def build_data_access_section(accessions: list[str], citation_info: dict) -> str
         f'<!-- NADIA-ACK-START -->\n{ack_html}\n<!-- NADIA-ACK-END -->'
     )
 ```
+
+### License and Data Use Derivation
+
+Set `accessType`, `license`, and `dataUseModifiers` on every **Dataset entity** (Standard 23). Derive from the source repository; validate every value against the live `PortalDataset` enums with `validate_against_enum()` before storing. The function below returns conservative, source-grounded defaults and a `flags` list to surface in the GitHub curation comment.
+
+```python
+import httpx
+
+# Map common repository license identifiers → PortalDataset enum values.
+# Always validate the result against the live schema enum before storing.
+LICENSE_ID_MAP = {
+    'cc-by-4.0': 'CC-BY 4.0', 'cc-by': 'CC-BY', 'cc-by-3.0': 'CC-BY 3.0',
+    'cc0-1.0': 'CC0 1.0', 'cc0': 'CC-0', 'cc-by-nc-4.0': 'CC BY-NC 4.0',
+    'cc-by-nc-nd-4.0': 'CC BY-NC-ND 4.0', 'cc-by-sa-4.0': 'CC BY-SA 4.0',
+    'cc-by-nc-sa-4.0': 'CC BY-NC-SA 4.0', 'odc-by-1.0': 'ODC-BY 1.0',
+    'public-domain': 'Public Domain',
+}
+
+# Repositories with no formal per-deposit license → honest UNKNOWN.
+NO_LICENSE_REPOS = {'GEO', 'SRA', 'ENA', 'ArrayExpress', 'dbGaP', 'EGA'}
+CONTROLLED_REPOS = {'dbGaP', 'EGA'}
+
+def derive_license_and_data_use(repo: str, accession: str, source_metadata: dict) -> dict:
+    """
+    repo: source_repository name (e.g. 'GEO', 'Zenodo', 'dbGaP', 'TCIA', 'PRIDE').
+    source_metadata: whatever was fetched for the deposit (Zenodo/Figshare/Dryad
+                     API json, dbGaP consent code, TCIA collection license, etc.).
+    Returns {'accessType','license','dataUseModifiers','conditionsOfAccess','flags'}.
+    Validate each enum value with validate_against_enum() against PortalDataset
+    before storing — schema enums are authoritative (Standard 1, 22).
+    """
+    flags = []
+    access = 'Controlled Access' if repo in CONTROLLED_REPOS else 'Open Access'
+    conditions = ''
+    license_val = 'UNKNOWN'
+    duo = ['General Research Use']
+
+    if repo in ('Zenodo', 'Figshare', 'Dryad', 'DataCite'):
+        lic_id = ''
+        lic = source_metadata.get('license')
+        if isinstance(lic, dict):
+            lic_id = (lic.get('id') or lic.get('rights') or '').lower()
+        elif isinstance(lic, str):
+            lic_id = lic.lower()
+        license_val = LICENSE_ID_MAP.get(lic_id, 'UNKNOWN')
+        if repo == 'Dryad' and license_val == 'UNKNOWN':
+            license_val = 'CC0 1.0'   # Dryad standard
+        if license_val == 'UNKNOWN' and lic_id:
+            flags.append(f'license: repo reported "{lic_id}" — no enum match, set UNKNOWN; human to confirm')
+    elif repo == 'PRIDE':
+        license_val = 'CC0 1.0'       # ProteomeXchange default
+    elif repo == 'TCIA':
+        license_val = source_metadata.get('tcia_license', 'CC-BY 4.0')
+        flags.append('license: TCIA per-collection license — confirm against collection page (Standard 16)')
+    elif repo in NO_LICENSE_REPOS:
+        # GEO/SRA/ENA/ArrayExpress do not attach a formal license.
+        stated = source_metadata.get('data_availability_license')
+        license_val = LICENSE_ID_MAP.get((stated or '').lower(), 'UNKNOWN')
+
+    # Non-commercial licenses constrain use
+    if license_val.startswith('CC BY-NC'):
+        duo = ['General Research Use', 'Non-Commercial Use Only']
+
+    # Controlled-access cohorts: derive DUO from the consent metadata when present
+    if access == 'Controlled Access':
+        consent = (source_metadata.get('consent_code') or source_metadata.get('duo') or '').upper()
+        duo = []
+        if 'GRU' in consent: duo.append('General Research Use')
+        if 'HMB' in consent: duo.append('Health or Medical or Biomedical Research')
+        if 'DS'  in consent: duo.append('Disease Specific Research')
+        if 'IRB' in consent: duo.append('Ethics Approval Required')
+        if 'PUB' in consent: duo.append('Publication Required')
+        if 'COL' in consent: duo.append('Collaboration Required')
+        if 'NCU' in consent: duo.append('Non-Commercial Use Only')
+        if not duo:
+            duo = ['Health or Medical or Biomedical Research']
+            flags.append('dataUseModifiers: controlled-access consent code not found — used HMB default; human to confirm')
+        conditions = 'Requires Data Access Committee approval / application via the source repository.'
+    else:
+        # Open journal-linked deposits almost always expect citation
+        if source_metadata.get('has_publication', True):
+            duo = sorted(set(duo + ['Publication Required']))
+
+    if license_val == 'UNKNOWN':
+        flags.append(f'license: {repo} attaches no formal license to deposits — set UNKNOWN (honest default); '
+                     f'check the paper data-availability statement for an explicit license')
+
+    return {
+        'accessType': access,
+        'license': license_val,
+        'dataUseModifiers': duo,
+        'conditionsOfAccess': conditions,
+        'flags': flags,
+    }
+```
+
+Set these on the Dataset entity alongside the other dataset annotations (Step 6 / Phase 3). Surface them in the wiki via the Data Access section below, and record every entry in `flags` under the GitHub curation comment's "Items for human review" (license and DUO are legally meaningful — never silently default).
 
 ### Repository-specific citation lookup
 
@@ -2443,6 +2560,11 @@ def verify_project(syn, proj, schema_props_by_folder, required_proj_annos, has_g
             F('dataset_version_not_minted', did, '')
         if re.fullmatch(r'[A-Za-z]+_[A-Z]+\d+', d.get('name', '')):
             F('dataset_name_not_descriptive', did, d.get('name'))
+        # License / Data Use / Access type required on the Dataset entity (Standard 23)
+        dsa = syn.restGET(f'/entity/{did}/annotations2').get('annotations', {})
+        for req in ('accessType', 'license', 'dataUseModifiers'):
+            if not val(dsa, req):
+                F('dataset_license_use_missing', did, req)
 
         # files: schema bound + per-file assertions
         folder_id = ds['files_folder_id']
