@@ -173,6 +173,11 @@ Write and run `{WORKSPACE_DIR}/synapse_actions.py`:
 
 For each approved group (max 50 write operations total):
 
+> **Turn-budget efficiency for large / multi-dataset studies.** A single study can have many datasets and hundreds of files (e.g. a superseries with 6 datasets / 400 files). The run has a finite turn budget, so:
+> - **Do the bulk work in scripts, not in per-file tool calls.** One `synapse_actions.py` should loop over all files in a dataset (create entities, set annotations, contentSize) in a single execution — never one tool call per file. Likewise enumerate/annotate inside loops in `apply_audit_fixes.py` and `verify.py`.
+> - **Complete each dataset fully before starting the next** — create its files, set every annotation, build the Dataset entity, and (in Phase 3) mint its version, then move on. Process datasets in a deterministic order. This way, if the turn budget is reached mid-study, the datasets already done are *complete and publication-ready*, not half-annotated — and the remaining accessions are still recorded in the state table as `discovered` for the next run to finish, rather than leaving a partially-curated mess.
+> - **Record progress in the state table as you complete each dataset**, so a re-run resumes cleanly from where this one stopped.
+
 **For NEW groups:**
 1. Create Synapse project named `suggested_project_name` from Claude scoring
 2. Folder hierarchy: `Raw Data/`, `Source Metadata/`

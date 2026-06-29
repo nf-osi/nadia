@@ -21,7 +21,7 @@ on:
 jobs:
   contribute:
     runs-on: ubuntu-latest
-    timeout-minutes: 120
+    timeout-minutes: 180
 
     steps:
       - name: Checkout repository
@@ -74,7 +74,7 @@ jobs:
             --permission-mode bypassPermissions \
             --output-format stream-json \
             --verbose \
-            --max-turns 80 \
+            --max-turns 150 \
             --add-dir "${{ github.workspace }}" \
             -p "$(cat ${WORKSPACE_DIR}/daily_task.md)"
         env:
