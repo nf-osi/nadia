@@ -609,6 +609,55 @@ def get_file_list_openneuro(dataset_id: str) -> list[tuple[str, str]]:
             files.append((filename, urls[0]))
     return files
 # Landing page: https://openneuro.org/datasets/{dataset_id}
+
+
+def get_file_list_ngdc(accession: str) -> list[tuple[str, str]]:
+    """
+    NGDC / CNCB (China). accession is one of:
+      CRA######  -> GSA (open run archive; per-run FASTQ on the download server)
+      OMIX######  -> OMIX (miscellaneous; usually one or more archive files)
+      HRA######  -> GSA-Human (CONTROLLED access; no public files -> landing page)
+      PRJCA###### -> NGDC BioProject (resolve to its child CRA/OMIX, then enumerate those)
+
+    NGDC has no public JSON search/listing API and its record pages are JS-rendered,
+    so direct file enumeration is best-effort. Strategy:
+      1. For OMIX/CRA, probe the public download server directory and list any files.
+      2. If nothing is enumerable (controlled access, JS-only listing), return [] so
+         the caller falls back to a landing-page ExternalLink. Phase 4 then flags
+         `file-enumeration-required` for a human to link the files (Standard 13).
+    """
+    acc = accession.strip().upper()
+    if acc.startswith('HRA'):
+        return []  # GSA-Human controlled — application required; landing page only
+
+    # Public download server base paths (HTTPS mirror of the FTP server)
+    bases = []
+    if acc.startswith('OMIX'):
+        bases = [f'https://download.cncb.ac.cn/omix/{acc}/']
+    elif acc.startswith('CRA'):
+        # GSA shards CRA accessions across numbered dirs; the unsharded path usually redirects
+        bases = [f'https://download.cncb.ac.cn/gsa/{acc}/',
+                 f'https://download.big.ac.cn/gsa/{acc}/']
+
+    files = []
+    for base in bases:
+        try:
+            r = httpx.get(base, timeout=30, follow_redirects=True)
+            if r.status_code != 200:
+                continue
+            # Apache-style autoindex: pull hrefs that look like real files
+            import re as _re
+            for href in _re.findall(r'href="([^"?/][^"]*\.[A-Za-z0-9.]+)"', r.text):
+                if href in ('../',):
+                    continue
+                files.append((href, base + href))
+            if files:
+                break
+        except Exception:
+            continue
+    return files
+# Landing pages: GSA https://ngdc.cncb.ac.cn/gsa/browse/{CRA} | OMIX https://ngdc.cncb.ac.cn/omix/release/{OMIX}
+# | GSA-Human https://ngdc.cncb.ac.cn/gsa-human/browse/{HRA} | BioProject https://ngdc.cncb.ac.cn/bioproject/browse/{PRJCA}
 ```
 
 ---

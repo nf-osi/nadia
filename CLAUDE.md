@@ -275,6 +275,8 @@ def get_europepmc_accessions(pmid: str) -> list[dict]:
 
 Europe PMC provider → repository: `GEO` → GEO, `ENA`/`SRA` → SRA/ENA, `EGA` → EGA, `ArrayExpress` → ArrayExpress, `PRIDE` → PRIDE, `metabolights` → MetaboLights, `Zenodo` → Zenodo, `Figshare` → Figshare.
 
+**NGDC/CNCB (China) accessions are usually NOT annotated by Europe PMC**, so also scan the paper's data-availability/methods text directly with the NGDC regexes from the CrossRef `DATA_REPO_PATTERNS` block (`CRA######`, `HRA######`, `PRJCA######`, `OMIX######`). Active Chinese NF groups deposit in GSA/OMIX, and these accessions never appear in GEO/SRA/ENA — full-text extraction is the only way to catch them.
+
 **Never accept `S-EPMC*` accessions or `provider: EuropePMC` entries from the annotations API.** These are auto-generated BioStudies records holding journal supplementary files (PDFs, Word docs) — not research datasets.
 
 **DataCite API — institutional and national repository datasets:**
@@ -355,6 +357,14 @@ def get_crossref_data_links(doi: str) -> list[dict]:
         (r'(MTBLS\d{3,6})',                                           'MetaboLights'),
         (r'cellxgene\.cziscience\.com/collections/([a-f0-9-]{36})',  'CELLxGENE'),
         (r'openneuro\.org/datasets/(ds\d{6})',                        'OpenNeuro'),
+        # NGDC / CNCB (China) — GSA, GSA-Human, OMIX, BioProject. These accessions
+        # never appear in GEO/SRA/ENA and NGDC mints no DataCite DOI, so this regex
+        # on the paper's data-availability statement is the primary way to catch them.
+        (r'(CRA\d{6})',                                               'NGDC'),   # GSA run-archive
+        (r'(HRA\d{6})',                                               'NGDC'),   # GSA-Human (controlled)
+        (r'(PRJCA\d{6})',                                             'NGDC'),   # NGDC BioProject
+        (r'(OMIX\d{6})',                                              'NGDC'),   # OMIX miscellaneous
+        (r'(SAMC\d{6,9})',                                            'NGDC'),   # NGDC BioSample
     ]
     found = []
     for field in ['relation', 'link', 'resource']:
@@ -933,6 +943,11 @@ Format: `{prefix}:{accession_id}`. One entry per repository accession. Set as a 
 | Cell Image Library | `cil` | `cil:47049` |
 | NCI GDC | `gdc` | `gdc:TCGA-SARC` |
 | TCIA | `tcia.collection` | `tcia.collection:Vestibular-Schwannoma-SEG` |
+| OpenNeuro | `openneuro` | `openneuro:ds004215` |
+| NGDC GSA | `ngdc.gsa` | `ngdc.gsa:CRA004523` |
+| NGDC GSA-Human | `ngdc.gsa-human` | `ngdc.gsa-human:HRA001234` |
+| NGDC OMIX | `ngdc.omix` | `ngdc.omix:OMIX001037` |
+| NGDC BioProject | `ngdc.bioproject` | `ngdc.bioproject:PRJCA012345` |
 
 Do NOT add `pubmed:{pmid}` — PubMed is not a data repository.
 
@@ -949,7 +964,10 @@ REPO_TO_PREFIX = {
     'cBioPortal': 'cbioportal', 'Dryad': 'dryad',
     'Science Data Bank': 'scidb', 'TIB': 'tib',
     'Cell Image Library': 'cil', 'NCI GDC': 'gdc',
-    'TCIA': 'tcia.collection',
+    'TCIA': 'tcia.collection', 'OpenNeuro': 'openneuro',
+    # NGDC/CNCB: pick the sub-archive prefix from the accession shape —
+    # CRA*→ngdc.gsa, HRA*→ngdc.gsa-human, OMIX*→ngdc.omix, PRJCA*→ngdc.bioproject
+    'NGDC': 'ngdc.gsa',
 }
 
 alternate_data_repos = []
