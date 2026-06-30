@@ -76,6 +76,8 @@ jobs:
             -p "$(cat /tmp/nf_agent/nadia_dream_prompt.md)"
         env:
           ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
+          # Pin the pipeline model + 1M context window (large prompts). [1m] = 1M-token context.
+          ANTHROPIC_MODEL: "claude-opus-4-8[1m]"
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           GITHUB_REPOSITORY: ${{ github.repository }}
           AGENT_REPO_ROOT: ${{ github.workspace }}

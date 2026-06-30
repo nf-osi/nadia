@@ -18,7 +18,9 @@ agent:
   state_project_id: null
 
 relevance:
-  model: "claude-sonnet-4-6"
+  # NOTE: relevance scoring is performed by the main agent via direct reasoning
+  # (see CLAUDE.md "Relevance Scoring") — NOT a separate nested model call. The
+  # pipeline model is pinned in the workflow `claude --model` flag, not here.
   threshold: 0.70          # Minimum relevance score (0.0–1.0)
   require_primary_data: true
   min_sample_count: 3      # null = no minimum
