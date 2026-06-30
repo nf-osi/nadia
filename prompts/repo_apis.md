@@ -613,48 +613,65 @@ def get_file_list_openneuro(dataset_id: str) -> list[tuple[str, str]]:
 
 def get_file_list_ngdc(accession: str) -> list[tuple[str, str]]:
     """
-    NGDC / CNCB (China). accession is one of:
-      CRA######  -> GSA (open run archive; per-run FASTQ on the download server)
-      OMIX######  -> OMIX (miscellaneous; usually one or more archive files)
-      HRA######  -> GSA-Human (CONTROLLED access; no public files -> landing page)
-      PRJCA###### -> NGDC BioProject (resolve to its child CRA/OMIX, then enumerate those)
+    NGDC / CNCB (China). There is NO public search/listing API and the search UI is
+    JS-rendered, BUT individual *record* pages are static, parseable HTML that expose
+    the sharded download base + per-run files — so enumeration of a known accession
+    works (it's only keyword *search* that isn't available programmatically).
 
-    NGDC has no public JSON search/listing API and its record pages are JS-rendered,
-    so direct file enumeration is best-effort. Strategy:
-      1. For OMIX/CRA, probe the public download server directory and list any files.
-      2. If nothing is enumerable (controlled access, JS-only listing), return [] so
-         the caller falls back to a landing-page ExternalLink. Phase 4 then flags
-         `file-enumeration-required` for a human to link the files (Standard 13).
+      CRA######  -> https://ngdc.cncb.ac.cn/gsa/browse/{CRA}        (GSA, open)
+      OMIX###### -> https://ngdc.cncb.ac.cn/omix/release/{OMIX}     (OMIX, open)
+      HRA######  -> GSA-Human, CONTROLLED -> [] (application required; landing page)
+      PRJCA##### -> https://ngdc.cncb.ac.cn/bioproject/browse/{PRJCA} (resolve children, recurse)
+
+    GSA file URLs are {download_base}/{CRR}/{filename}, where the sharded base
+    (e.g. https://download.cncb.ac.cn/gsa5/CRA043190) and the run accessions
+    (CRR######) + per-run filenames are all present in the record-page HTML.
+    Set contentSize via a HEAD on each URL (Content-Length) — Standard 21.
     """
+    import re as _re
     acc = accession.strip().upper()
     if acc.startswith('HRA'):
         return []  # GSA-Human controlled — application required; landing page only
 
-    # Public download server base paths (HTTPS mirror of the FTP server)
-    bases = []
-    if acc.startswith('OMIX'):
-        bases = [f'https://download.cncb.ac.cn/omix/{acc}/']
-    elif acc.startswith('CRA'):
-        # GSA shards CRA accessions across numbered dirs; the unsharded path usually redirects
-        bases = [f'https://download.cncb.ac.cn/gsa/{acc}/',
-                 f'https://download.big.ac.cn/gsa/{acc}/']
+    if acc.startswith('PRJCA'):
+        # BioProject: resolve to child CRA/OMIX accessions and enumerate each
+        try:
+            html = httpx.get(f'https://ngdc.cncb.ac.cn/bioproject/browse/{acc}',
+                             timeout=30, follow_redirects=True, verify=False).text
+        except Exception:
+            return []
+        out = []
+        for child in sorted(set(_re.findall(r'(CRA\d{6}|OMIX\d{6})', html))):
+            out += get_file_list_ngdc(child)
+        return out
+
+    page = (f'https://ngdc.cncb.ac.cn/gsa/browse/{acc}' if acc.startswith('CRA')
+            else f'https://ngdc.cncb.ac.cn/omix/release/{acc}' if acc.startswith('OMIX')
+            else None)
+    if not page:
+        return []
+    try:
+        # download.* hosts can have flaky certs; the ngdc.cncb.ac.cn record page is fine.
+        html = httpx.get(page, timeout=30, follow_redirects=True, verify=False).text
+    except Exception:
+        return []
 
     files = []
-    for base in bases:
-        try:
-            r = httpx.get(base, timeout=30, follow_redirects=True)
-            if r.status_code != 200:
-                continue
-            # Apache-style autoindex: pull hrefs that look like real files
-            import re as _re
-            for href in _re.findall(r'href="([^"?/][^"]*\.[A-Za-z0-9.]+)"', r.text):
-                if href in ('../',):
-                    continue
-                files.append((href, base + href))
-            if files:
-                break
-        except Exception:
-            continue
+    if acc.startswith('CRA'):
+        m = _re.search(r'(https?://download\.cncb\.ac\.cn/gsa\d*/' + acc + r')', html)
+        if m:
+            base = m.group(1)
+            for fn in sorted(set(_re.findall(
+                    r'(CRR\d+_[A-Za-z0-9.\-]+\.(?:fq|fastq|bam|cram|vcf)(?:\.gz)?)', html))):
+                crr = fn.split('_')[0]
+                files.append((fn, f'{base}/{crr}/{fn}'))   # {base}/{CRR}/{file} — verified 200
+    else:  # OMIX and any record exposing direct download links
+        for url in sorted(set(_re.findall(
+                r'(https?://download\.(?:cncb|big)\.[^"\'\s<>]+\.[A-Za-z0-9.]+)', html))):
+            files.append((url.rsplit('/', 1)[-1], url))
+
+    # If a record's files aren't enumerable (e.g. JS-only OMIX archive), return [] so the
+    # caller falls back to a landing-page ExternalLink -> Phase 4 file-enumeration-required.
     return files
 # Landing pages: GSA https://ngdc.cncb.ac.cn/gsa/browse/{CRA} | OMIX https://ngdc.cncb.ac.cn/omix/release/{OMIX}
 # | GSA-Human https://ngdc.cncb.ac.cn/gsa-human/browse/{HRA} | BioProject https://ngdc.cncb.ac.cn/bioproject/browse/{PRJCA}
