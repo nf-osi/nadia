@@ -489,6 +489,7 @@ def fetch_schema_enums(schema_uri: str) -> dict[str, list[str]]:
    - **Behavioral / phenotype data** (open field, rotarod, clinical questionnaires): use a behavioral template if available. These often require compound/drug fields — for non-drug studies, set compound fields to `'Not Applicable'` / `'0'` / `'Not Applicable'`.
    - **Single-cell data** (scRNA-seq, snATAC-seq, scADT): use a single-cell template if available. Verify `library_source = 'TRANSCRIPTOMIC SINGLE CELL'` or protocol mentions 10x Chromium / Drop-seq / Smart-seq2 before using.
    - **Mass spectrometry / proteomics**: use a proteomics template if available.
+   - **Processed gene-expression matrices** (raw count tables, normalized counts, `*_rawcounts.txt`, `*_counts.csv`, TPM/FPKM/featureCounts output): bind the **ProcessedGeneExpression** template, NOT a raw-sequencing template. Raw-vs-processed is a distinct axis from assay type — the same RNA-seq study may have raw FASTQ (raw sequencing template) and a processed count matrix (ProcessedGeneExpression), each needing its own files folder and template. Choose by the actual file content of the folder, not the study's overall assay. (Issue #272)
    - **General / fallback**: use the broadest available template (often one with the largest `assay` enum) when no assay-specific template matches.
 4. After selection, always call `fetch_schema_properties(schema_uri)` to get the actual field list for that template — never assume field names from a different template carry over.
 5. If the assay enum in the selected template does not contain the study's assay type, try the next most general template before falling back. Record which template was selected and why in the curation comment.
@@ -2216,7 +2217,7 @@ After running `audit.py`, read `{WORKSPACE_DIR}/audit_results.json`. For each pr
    - `alternateDataRepository`: reconstruct from accession_id + source_repository using REPO_TO_PREFIX
    - `assay`, `species`, `tumorType`, `diagnosis`: infer from abstract + title — but see Standard 12: if samples are normal/control cells, do NOT assign the disease tumor type
    - `platform`: fetch from repository metadata (GEO GSE → series platform, SRA → instrument model)
-   - `libraryPreparationMethod`: infer from abstract ("10x Chromium", "Smart-seq2", "polyA", etc.)
+   - `libraryPreparationMethod`: kit/protocol — infer from abstract ("10x Chromium", "Smart-seq2", etc.). Distinct from `libraryPrep` (RNA selection strategy): for poly-A/mRNA enrichment set `libraryPrep = 'polyAselection'` (exact enum, not 'polyA'); for ribo-depletion use `'rRNADepletion'`.
    - `specimenID` for files where auto-parse failed: look at repository sample table (GEO GSM list, SRA BioSample)
    - `wiki` missing: create using the wiki template from this file
    - **`LANDING_PAGE_FALLBACK` warnings**: for each dataset flagged in Phase 1 warnings, add an item to the GitHub curation comment under "Items for human review": `file-enumeration-required — files folder contains only a landing-page link to {url}. Actual data files could not be enumerated. Manual re-enumeration or data linking needed.`
@@ -2244,7 +2245,7 @@ After running `audit.py`, read `{WORKSPACE_DIR}/audit_results.json`. For each pr
           "tumorType": "Neurofibroma",
           "diagnosis": "Neurofibromatosis type 1",
           "platform": "Illumina NovaSeq 6000",
-          "libraryPreparationMethod": "polyA",
+          "libraryPrep": "polyAselection",
           "specimenID": "NF001",
           "individualID": "NF001"
         }

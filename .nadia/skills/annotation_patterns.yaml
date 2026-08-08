@@ -304,9 +304,12 @@ patterns:
       - Wild-type controls in any experiment: nf1Genotype = '+/+'
       Set the value from BioSample genotype attribute; if the genotype field says
       'NF1KO' or 'NF1 knockout' without specifying zygosity, default to '-/-'.
-    source: fix
-    issues: [226]
-    added: "2026-04-16"
+      Issue #272 confirmed: wild-type (WT) control mice in an NF1 study must have
+      nf1Genotype = '+/+'. Do not leave WT controls blank or copy the experimental
+      group's genotype — WT controls are genetically wild-type by definition.
+    source: fix+confirmed
+    issues: [226, 272]
+    updated: "2026-06-14"
 
   - pattern: "full text fallback: Unpaywall → Semantic Scholar when not in PMC"
     rule: >
@@ -541,3 +544,75 @@ patterns:
     source: fix
     issues: [23]
     added: "2026-05-03"
+
+  - pattern: "sex-must-not-be-extrapolated"
+    rule: >
+      The sex field must come from a direct, per-sample source — a BioSample/ENA
+      `sex` attribute, a GEO GSM characteristic, a supplementary table column, or
+      an explicit statement in the paper that applies unambiguously to the sample.
+      If sex cannot be directly verified for a given file, leave it BLANK — do NOT
+      extrapolate or infer it. Specifically, do NOT:
+        - assume a sex from a mouse strain or cell line's typical/default sex
+        - apply a cohort-level statement ("samples were male and female") to every
+          file when the per-sample assignment is unknown
+        - guess from a name, pronoun, or model-system convention
+      A blank sex field is correct and acceptable when the source data does not
+      state it; an extrapolated value is a fabrication that misleads downstream
+      users. Issue #272: a data manager explicitly corrected NADIA for inferring
+      sex and instructed "If sex cannot be directly verified, leave it blank and
+      do not extrapolate." This rule overrides any tendency to fill every required
+      field — sex is exempt from best-effort filling when no direct source exists.
+    source: fix
+    issues: [272]
+    added: "2026-06-14"
+
+  - pattern: "libraryPrep-polyA-selection-exact-enum"
+    rule: >
+      The schema field that captures RNA library selection strategy is `libraryPrep`
+      (distinct from `libraryPreparationMethod`, which is the kit/protocol). For
+      bulk RNA-seq where the methods describe poly-A / mRNA / oligo-dT enrichment,
+      set `libraryPrep = 'polyAselection'` — the EXACT enum string, not 'polyA',
+      'poly-A', 'polyA selection', or 'mRNA'. For ribo-depletion / total-RNA
+      protocols use the corresponding enum (e.g. 'rRNADepletion'); verify the exact
+      spelling via fetch_schema_properties(). Issue #272: a data manager corrected
+      NADIA to annotate `libraryPrep = polyAselection` where appropriate — NADIA
+      had left it unset or used the wrong field/value. Determine the selection
+      method from the paper Methods (library prep description) or GEO
+      `!Sample_extract_protocol`; do not infer it from the instrument or title.
+    source: fix
+    issues: [272]
+    added: "2026-06-14"
+
+  - pattern: "processed-counts-use-processed-expression-template"
+    rule: >
+      When the deposited files are processed gene-expression matrices (raw count
+      tables, normalized count matrices, *_rawcounts.txt, *_counts.csv, TPM/FPKM
+      tables, featureCounts output), bind the ProcessedGeneExpression template to
+      that files folder — NOT a raw-sequencing template (bulksequencingassaytemplate,
+      RNA-seq raw template). Raw-vs-processed is a distinct axis from assay type:
+      the same RNA-seq study can have raw FASTQ (raw sequencing template) AND a
+      processed count matrix (ProcessedGeneExpression template), each in its own
+      files folder. Choose by the actual file content of the folder, not the study's
+      overall assay. Issue #272: a data manager instructed NADIA to "use the
+      ProcessedGeneExpression template with the rawcounts files." Detection signal:
+      folder contains only tabular count/expression files with no FASTQ/BAM.
+    source: fix
+    issues: [272]
+    added: "2026-06-14"
+
+  - pattern: "normal-control-tumortype-not-applicable"
+    rule: >
+      tumorType (and diagnosis) must reflect what the sample biologically IS, not
+      the disease that motivates the study. Normal / control tissue and normal
+      cells must have `tumorType = 'Not Applicable'` — never the study's tumor type
+      inherited from the disease search context. This includes normal nerve, healthy
+      donor controls, normal adjacent tissue, immortalized normal cell lines (even
+      with a disease-gene knockout), iPSCs, and wild-type/untreated control samples.
+      Issue #272 confirmed CLAUDE.md Standard 12: a data manager corrected NADIA to
+      set `tumorType = Not Applicable` for normal nerve samples. Do not leave the
+      field blank (the schema requires it) and do not copy the tumor group's value.
+      Read the paper Methods / per-sample table to classify each sample as tumor vs
+      normal/control before setting tumorType per file.
+    source: fix+confirmed
+    issues: [272]
+    added: "2026-06-14"

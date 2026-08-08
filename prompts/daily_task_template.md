@@ -246,6 +246,11 @@ After running `audit.py`, read `{WORKSPACE_DIR}/audit_results.json`. For **every
 
 4. **Sample-varying field check (Standard 5)** — For any field that should vary per sample (genotype, condition, sex, age, tissue, cell type, treatment), verify the per-file values are distinct where the study design requires it. If all files have the same value for a field that should vary, re-derive per-file values from the per-sample metadata fetched in Tier 1–2.
 
+   - **`sex` — never extrapolate (Issue #272):** set `sex` only from a direct per-sample source. If sex cannot be directly verified for a file, leave it blank rather than inferring from strain/cell-line default, model convention, or a cohort-level statement. The audit must clear any `sex` value that was set by reasoning without a direct structured/table source. A blank `sex` is correct here; do not treat it as an unfilled gap requiring escalation.
+   - **`tumorType`/`diagnosis` on normal & control samples (Standard 12, Issue #272):** classify each sample as tumor vs normal/control from the paper Methods or per-sample table before setting `tumorType`. Normal tissue (e.g. normal nerve), healthy controls, normal-adjacent tissue, immortalized normal lines, iPSCs, and wild-type/untreated controls must have `tumorType = 'Not Applicable'` — never the study's tumor type inherited from disease context.
+   - **`nf1Genotype` on WT controls (Issue #272):** wild-type control mice/samples must have `nf1Genotype = '+/+'`; do not leave blank or copy the experimental group's genotype.
+   - **`libraryPrep` for RNA-seq (Issue #272):** when Methods describe poly-A/mRNA enrichment, set `libraryPrep = 'polyAselection'` (exact enum, distinct from `libraryPreparationMethod`); for ribo-depletion use `'rRNADepletion'`.
+
 5. For non-file annotation gaps:
    - Investigator/study lead fields → **always from PubMed AuthorList** (first + last/corresponding author); never from ENA/repository submitter
    - Institution/affiliation fields → from PubMed author affiliations
