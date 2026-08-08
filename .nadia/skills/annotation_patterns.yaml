@@ -541,3 +541,61 @@ patterns:
     source: fix
     issues: [23]
     added: "2026-05-03"
+
+  - pattern: "methylation-array-datatype-chromatin-activity"
+    rule: >
+      For DNA methylation array data (Illumina Infinium 450k / EPIC / 850k,
+      IDAT files, Series_platform describing a methylation BeadChip), set the
+      portal dataType annotation to 'chromatin activity' — NOT 'DNA methylation',
+      'methylation', or 'epigenomics'. The NF Data Portal uses 'chromatin
+      activity' as the dataType category for all methylation-array deposits, and
+      the annotation must be consistent with the rest of the portal so datasets
+      group together in portal filters. Detection signals: GEO
+      !Series_platform_id / !Sample_platform_id references GPL13534 (450k),
+      GPL21145 (EPIC), GPL23976 (EPIC v2); files are IDAT (.idat) pairs;
+      library_strategy / assay describes "methylation array" or "Infinium".
+      Verify the exact enum value at runtime against the live portal dataType
+      vocabulary before writing.
+    source: fix
+    issues: [316]
+    added: "2026-07-05"
+
+  - pattern: "nf2-genotype-from-chr22q-loss"
+    rule: >
+      The NF2 gene lies on chromosome 22q. Derive nf2Genotype from the sample's
+      chromosome 22q copy-number status, which is frequently reported per cell
+      line / per sample in a supplementary table rather than as a GEO/ENA
+      attribute:
+        - Biallelic 22q loss (loss of 22q / homozygous NF2 loss) → nf2Genotype = '-/-'
+        - Heterozygous 22q loss (single-copy 22q loss) → nf2Genotype = '+/-'
+        - No 22q loss reported / retained → nf2Genotype = '+/+'
+      Example from issue #316: the HEI-193 schwannoma line has heterozygous
+      chromosome 22q loss → nf2Genotype = '+/-'; other lines in that study with
+      full 22q loss (defined in the supplementary table) → '-/-'.
+      Do NOT set a single study-level nf2Genotype across all files — read the
+      per-line/per-sample 22q status from the supplementary table (Tier 2) and
+      apply per file. If per-sample 22q status is not stated, flag for human
+      review rather than guessing.
+    source: fix
+    issues: [316]
+    added: "2026-07-05"
+
+  - pattern: "schwannoma-sporadic-vs-syndromic-scope"
+    rule: >
+      A schwannoma is NOT automatically an NF2- or schwannomatosis-associated
+      tumor. Most schwannomas are sporadic — they arise without any hereditary
+      syndrome. When a study explicitly describes its cohort as sporadic
+      schwannoma (or does not recruit NF2 / schwannomatosis patients and reports
+      only somatic NF2 loss), the disease scope must reflect sporadic schwannoma —
+      do NOT assign diseaseFocus = 'Neurofibromatosis type 2' or 'Schwannomatosis'
+      just because the tumor type is schwannoma. Only assign NF2 / schwannomatosis
+      diseaseFocus when the cohort is genuinely syndromic (germline NF2 mutation,
+      diagnosed NF2 or schwannomatosis patients, or a germline-mutant model).
+      Somatic 22q / NF2 loss in an otherwise sporadic tumor is a somatic event,
+      not evidence of the hereditary syndrome (see germline-vs-somatic scoping,
+      CLAUDE.md Standard 13). Verify current valid schwannoma disease/manifestation
+      terms against the live portal vocabulary at runtime, and flag the
+      sporadic-vs-syndromic scope decision in the GitHub curation comment.
+    source: fix
+    issues: [316]
+    added: "2026-07-05"

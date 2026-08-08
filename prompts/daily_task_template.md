@@ -209,6 +209,7 @@ The audit script (code in `prompts/synapse_workflow.md`):
   - `resourceType` missing → `experimentalData`
   - `externalAccessionID`/`externalRepository`/`study` missing → set from known metadata
   - `dataSubtype` missing → infer from file extension (`raw` for fastq/bam/vcf, `processed` otherwise)
+  - `dataType` inconsistent for methylation arrays → if files are IDAT (.idat) or the GEO platform is an Illumina methylation BeadChip (GPL13534/450k, GPL21145/EPIC, GPL23976/EPIC v2) but `dataType` is not `chromatin activity`, correct it to `chromatin activity` (portal convention — see "methylation-array-datatype-chromatin-activity" in `.nadia/skills/annotation_patterns.yaml`, Issue #316)
   - `specimenID`/`individualID` parseable from filename (GSM/SRR/ERR prefix) → set
   - Schema binding missing → bind the schema
   - `resourceStatus` or `filename` annotations on File entities → remove

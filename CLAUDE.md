@@ -562,7 +562,7 @@ Read `curation_checklist.required_project_annotations` from config for the full 
 | Data availability status | e.g. `Available` | |
 | Disease/topic focus | From `annotations.disease_focus_values` in config | Use controlled vocabulary only |
 | Disease manifestation/subtype | From `annotations.manifestation_values` in config | Use controlled vocabulary only |
-| Assay / data type category | Controlled vocabulary from schema | List; may cover multiple assay types |
+| Assay / data type category | Controlled vocabulary from schema | List; may cover multiple assay types. **Methylation array data (Illumina 450k/EPIC/850k, IDAT files) → `dataType = 'chromatin activity'`** to stay consistent with the rest of the portal — not `'DNA methylation'` or `'methylation'` (Issue #316). Verify the exact value against the live portal `dataType` vocabulary. |
 | Study leads / investigators | **From PubMed AuthorList** — first + last/corresponding author | NOT the repository submitter |
 | Author institutions | From PubMed author affiliations | Truncate to fit annotation length limits |
 | Funding agency | From PubMed GrantList; fallback to a "not applicable" placeholder | |
@@ -722,6 +722,8 @@ When setting disease-focus or diagnosis annotations, distinguish between germlin
 2. Check model organism genotype: `Nf1+/-` (heterozygous germline) = germline model; `NF1 siRNA knockdown in MCF-7` = somatic model.
 3. When uncertain, use the specific tumor/cancer type annotation and flag for human review.
 
+**Schwannoma is not automatically syndromic.** Most schwannomas are sporadic — they arise without any hereditary syndrome. When a study describes its cohort as sporadic schwannoma (or does not recruit NF2 / schwannomatosis patients and reports only somatic 22q / NF2 loss), scope the disease as sporadic schwannoma. Do NOT assign `diseaseFocus = 'Neurofibromatosis type 2'` or `'Schwannomatosis'` merely because the tumor type is schwannoma — somatic 22q/NF2 loss in an otherwise sporadic tumor is a somatic event, not the hereditary syndrome. Only assign NF2 / schwannomatosis when the cohort is genuinely syndromic (germline NF2 mutation, diagnosed NF2 or schwannomatosis patients, or a germline-mutant model). Verify current valid schwannoma disease/manifestation terms against the live portal vocabulary and flag the sporadic-vs-syndromic scope decision in the curation comment. (Issue #316.)
+
 **Exception — functional variant classification studies:** When a study's explicit purpose is to functionally characterize variants of a disease gene for clinical interpretation in the disease population (e.g., VUS reclassification, saturation mutagenesis, base-editing variant scans, deep mutational scanning of NF1/NF2/SMARCB1/LZTR1), set the disease annotation EVEN IF the experimental system is a cancer cell line or non-disease cell type. The cell line is a tool; the study output (per-variant functional scores) is for the disease patient community. Detection signals: paper title or abstract uses phrases like "variant classification", "VUS reclassification", "functional impact of variants", "saturation genome editing", "base editing screen of {gene}", or "deep mutational scanning of {gene}", and the targeted gene is the disease gene, not an unrelated driver. Always flag this decision in the GitHub curation comment so the data manager can confirm portal scope.
 
 This distinction matters because portal data consumers use disease annotations to find data relevant to patients with inherited conditions — mixing in somatic cancer data produces misleading search results.
@@ -870,6 +872,8 @@ Key patterns to apply from supplementary clinical tables:
 - **Relapse vs. second primary**: A "relapse" or "recurrence" of a tumor maps to `Recurrent MPNST` (or equivalent `Recurrent {TumorType}` if that exists in the vocabulary); a "second primary" is a new independent tumor and maps to the primary tumor type, not a recurrent one.
 
 - **NF1 patient cohort neurofibromas**: Benign tumors (neurofibromas, schwannomas) from patients in an NF1 or NF2 disease cohort should have `nf1Genotype = '+/-'` (for NF1) or `nf2Genotype = '+/-'` (for NF2) even if not explicitly stated per sample — germline heterozygosity is the defining feature of NF1/NF2 diagnosis.
+
+- **NF2 genotype from chromosome 22q copy-number status**: The NF2 gene is on chromosome 22q, so per-sample/per-line NF2 genotype is derived from 22q loss reported in the supplementary table, not from a repository attribute. Biallelic 22q loss (loss of 22q / homozygous NF2 loss) → `nf2Genotype = '-/-'`; heterozygous (single-copy) 22q loss → `nf2Genotype = '+/-'`; no 22q loss reported → `'+/+'`. Apply per file from the supplementary table — never a single study-level value across all files. (Issue #316: the HEI-193 line has heterozygous 22q loss → `+/-`; other lines with full 22q loss → `-/-`.)
 
 - **Tumor subtype distinctions from supplementary**: Supplementary tables frequently disambiguate vague terms. For example, "benign neurofibroma" in the title might be clarified per-sample as "cutaneous neurofibroma" vs. "plexiform neurofibroma" in Supplementary Table 2. Always apply the more specific classification.
 
