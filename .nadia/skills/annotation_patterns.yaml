@@ -11,6 +11,12 @@
 #   source:    "fix" (human correction) | "confirmed" (human approved without changes)
 #   issues:    list of GitHub issue numbers that informed this rule
 #   added:     ISO date this entry was created or last updated
+#
+# Dream review log (weeks with no actionable annotation signal — no edits made):
+#   2026-06-21: review window 2026-06-14..2026-06-21 — 0 /nadia fix commands,
+#               0 annotation status reports, 0 newly approved studies, 0
+#               vocabulary gaps. No issues were filed in the window. No
+#               annotation patterns added, changed, or removed.
 
 patterns:
 
