@@ -1012,7 +1012,7 @@ The `GITHUB_TOKEN` and `GITHUB_REPOSITORY` environment variables are automatical
    - `/nadia fix: <description>` — request an annotation change (triggers Claude Code)
 3. **Data manager approves** by applying the `approved` label
 4. **`provision_study.yml` runs automatically** (code-only, no LLM):
-   - Sets `resourceStatus = approved` on project + all files + dataset entities
+   - Sets `resourceStatus = approved` on the project and its Dataset entities (not on File entities — `resourceStatus` never belongs on files)
    - Adds project to portal FileView scope (`files_table_id` from config)
    - Updates NADIA state table to `status = approved`
    - Posts completion comment and closes the issue

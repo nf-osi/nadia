@@ -517,6 +517,80 @@ patterns:
     issues: [35]
     added: "2026-05-03"
 
+  - pattern: "datatype-spaced-lowercase-enum"
+    rule: >
+      The dataType annotation must use values from the live `Data` enum, which are
+      **spaced and lowercase** — e.g. `gene expression`, `genomic variants`,
+      `aligned reads`, `chromatin activity`. NEVER emit camelCase forms such as
+      `geneExpression`, `genomicVariants`, or `proteomics`-as-camelCase; these are
+      not in the enum and fail validation. Map the assay type to the closest enum
+      value (scRNA-seq / RNA-seq → `gene expression`; WGS/WXS variant calls →
+      `genomic variants`; ChIP/ATAC → `chromatin activity`) and always confirm the
+      exact string with validate_against_enum() against the live `Data` enum before
+      writing. Applies to both File-level and Dataset-level dataType fields.
+    source: fix
+    issues: [356, 355, 360]
+    added: "2026-09-20"
+
+  - pattern: "disease-focus-manifestation-live-enum-2022-nomenclature"
+    rule: >
+      The disease_focus_values and manifestation_values lists in
+      config/settings.yaml are a stale convenience cache — do NOT treat them as
+      authoritative. Fetch DiseaseFocusEnum and ManifestationEnum from the live
+      registered schema at runtime (as already done for File-level fields) and
+      emit only values present there. Known drift as of 2026-09 (2022
+      schwannomatosis nomenclature adopted by the dictionary):
+        - `Neurofibromatosis type 2` (config) → live value is
+          `NF2-related schwannomatosis`
+        - bare `Schwannomatosis` (config) → split into `22q-related schwannomatosis`,
+          `LZTR1-related schwannomatosis`, `SMARCB1-related schwannomatosis`,
+          `Schwannomatosis-NEC`, `Schwannomatosis-NOS`
+        - `MPNST` is NOT a diseaseFocus value at all — it is a ManifestationEnum
+          value; use `Malignant Peripheral Nerve Sheath Tumor (MPNST)` for
+          manifestation, and set diseaseFocus to `Neurofibromatosis type 1`
+          (or the applicable germline syndrome) instead.
+        - manifestation `Low-Grade Glioma NOS` → live value is `Low-Grade Glioma`.
+      Valid diseaseFocus values (verify at runtime, may change):
+      `22q-related schwannomatosis`, `LZTR1-related schwannomatosis`, `Multiple`,
+      `NF2-related schwannomatosis`, `Neurofibromatosis type 1`,
+      `SMARCB1-related schwannomatosis`, `Schwannomatosis-NEC`,
+      `Schwannomatosis-NOS`. When the source disease cannot be mapped to a live
+      value, flag it in the GitHub curation comment rather than emitting a stale term.
+    source: fix
+    issues: [356, 355]
+    added: "2026-09-20"
+
+  - pattern: "funding-agency-fallback-must-be-valid-enum"
+    rule: >
+      When the funding agency cannot be determined (empty PubMed GrantList, no
+      Acknowledgements section), the fundingAgency fallback must be a valid
+      `FundingAgencyEnum` value — NOT the free-text string
+      "Not Applicable (External Study)", which is not in the enum and fails
+      validation. FundingAgencyEnum values: `CTF`, `GFF`, `Independent`,
+      `NIH-NCI`, `NTAP`, `Other`. Map unmappable or unknown funders to `Other`.
+      When a specific agency IS found but does not match an enum value, use `Other`
+      and preserve the verbatim agency name in the project's free-text funding
+      field (unconstrained) and in the GitHub curation comment. Only fall back to
+      `Other` after exhausting Tier 2 gap-fill (PubMed GrantList, then PMC
+      Acknowledgements).
+    source: fix
+    issues: [356, 355]
+    added: "2026-09-20"
+
+  - pattern: "resourceStatus-not-changed-on-files-at-approval"
+    rule: >
+      Approval/provisioning sets resourceStatus=approved ONLY on the Project and
+      its Dataset entities — never on File entities. resourceStatus never belongs
+      on files at any stage (see resourceStatus-must-not-appear-on-File-entities).
+      Any documentation or curation comment claiming approval sets file-level
+      resourceStatus is wrong: the audit actively removes resourceStatus from
+      files, so a "missing resourceStatus" report on a File entity is a false
+      positive, not a real gap. Do not report resourceStatus as a required
+      File-level field.
+    source: fix
+    issues: [358, 355]
+    added: "2026-09-20"
+
   - pattern: "accessions-verify-generated-not-reused"
     rule: >
       Before associating a dataset accession with a paper's Synapse project, verify

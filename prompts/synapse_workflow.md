@@ -2210,7 +2210,7 @@ After running `audit.py`, read `{WORKSPACE_DIR}/audit_results.json`. For each pr
 2. **If PMID is available and abstract is missing**, fetch it: `Entrez.efetch(db='pubmed', id=pmid, rettype='xml')`
 3. **Reason through each gap** using the publication title + abstract + repository metadata:
    - `diseaseFocus`, `manifestation`: infer from disease mentions in abstract
-   - `dataType`: infer from assay type (scRNA-seq → `geneExpression`)
+   - `dataType`: infer from assay type, then map to a valid `Data` enum value. The `Data` enum uses **spaced, lowercase** terms (`gene expression`, `genomic variants`, `aligned reads`, `chromatin activity`, …) — never camelCase concatenations of those words. e.g. scRNA-seq → `gene expression`. Always confirm the value with `validate_against_enum()` against the live `Data` enum before writing (camelCase forms are not in the enum and fail validation).
    - `studyLeads`: if PMID known, fetch AuthorList; take first + last author
    - `institutions`: from author affiliations in PubMed record
    - `alternateDataRepository`: reconstruct from accession_id + source_repository using REPO_TO_PREFIX
@@ -2229,7 +2229,7 @@ After running `audit.py`, read `{WORKSPACE_DIR}/audit_results.json`. For each pr
     "project_annotation_fixes": {
       "diseaseFocus": ["Neurofibromatosis type 1"],
       "manifestation": ["Neurofibroma"],
-      "dataType": ["geneExpression"],
+      "dataType": ["gene expression"],
       "studyLeads": ["Smith J", "Doe A"],
       "institutions": ["University of X"],
       "alternateDataRepository": ["zenodo.record:4688881"]
