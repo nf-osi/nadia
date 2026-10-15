@@ -233,18 +233,46 @@ dataset_body['items'] = file_items
 syn.restPUT(f'/entity/{dataset_id}', json.dumps(dataset_body))
 ```
 
-### Step 3 — Annotate the Dataset entity
+### Step 3 — Annotate the Dataset entity (schema-driven)
+
+Dataset annotations come from the `PortalDatasetCandidate` schema — see "Dataset Entity Annotations — Schema-Driven" below for `resolve_dataset_schema()`, the derivation rules, and `annotate_dataset_entity()`. Do not write a literal annotation dict here.
 
 ```python
-ann = syn.restGET(f'/entity/{dataset_id}/annotations2')
-ann['annotations'] = {
-    'contentType':         {'type': 'STRING', 'value': ['dataset']},
-    'externalAccessionID': {'type': 'STRING', 'value': [accession_id]},
-    'externalRepository':  {'type': 'STRING', 'value': [repository]},
-    'resourceStatus':      {'type': 'STRING', 'value': ['pendingReview']},
-    'study':               {'type': 'STRING', 'value': [project_name]},
+# Once per run, before the first dataset:
+ds_schema = resolve_dataset_schema(cfg)
+
+# Per dataset:
+ctx = {
+    'title':               dataset_name,
+    'description':         dataset_description,
+    'accession_id':        accession_id,
+    'source_repository':   repository,
+    'landing_url':         landing_url,
+    'n_direct_files':      n_direct_files,     # File entities with direct download URLs
+    'has_landing_link':    has_landing_link,   # landing-page fallback / controlled-access link created
+    'access_type':         dataset.get('access_type'),
+    'data_type':           data_types,         # Data enum values for THIS dataset
+    'disease_focus':       disease_focus,      # DiseaseFocusEnum values (from scoring)
+    'manifestation':       manifestation,
+    'species':             species,
+    'assay':               assays,
+    'creator':             study_leads,        # PubMed first + last author (fallback chain if no PMID)
+    'funder_agencies':     funding_agencies,   # verbatim, same strings as project fundingAgency
+    'grant_ids':           grant_ids,
+    'no_external_funding': no_external_funding,
+    'license_raw':         license_raw,        # repository record license, or None
+    'dataset_doi':         dataset_doi,        # data deposit DOI, never the paper DOI
+    'publication_doi':     doi,
 }
-syn.restPUT(f'/entity/{dataset_id}/annotations2', json.dumps(ann))
+report = annotate_dataset_entity(syn, dataset_id, ctx, ds_schema)   # merges, never replaces
+bind_dataset_schema(syn, dataset_id, ds_schema)                     # registry tier only
+if report['status'] == 'DATASET_SCHEMA_UNAVAILABLE':
+    print(f"  {accession_id}: DATASET_SCHEMA_UNAVAILABLE — no Dataset annotations written")
+elif report['missing_required'] or report['validation_errors']:
+    print(f"  {accession_id}: dataset missing {report['missing_required']} "
+          f"errors {report['validation_errors']}")
+dataset_record['dataset_annotation_report'] = report   # → created_projects.json
+dataset_record['dataset_context'] = ctx                # lets the audit re-derive the same values
 ```
 
 ### Step 4 — Define columns on the Dataset entity
@@ -500,36 +528,39 @@ def fetch_schema_enums(schema_uri: str) -> dict[str, list[str]]:
 After fetching enums, also collect all property names the schema defines. This determines what fields you CAN set — do not hardcode field names anywhere.
 
 ```python
-def fetch_schema_properties(schema_uri: str) -> dict:
+def schema_properties_from_json(schema: dict) -> dict:
     """
-    Return a dict of all property names defined in the schema.
-    Keys = field names. Values = dict with 'type', 'enum' (if constrained), 'description'.
-    Use this to know which fields exist — then populate as many as source data supports.
+    Parse a JSON schema document into a dict of its properties.
+    Keys = field names. Values = dict with 'type', 'enum' (if constrained),
+    'is_array', 'required' (True if listed in the schema's `required` array), 'description'.
     """
-    url = f'https://repo-prod.prod.sagebase.org/repo/v1/schema/type/registered/{schema_uri}'
-    resp = httpx.get(url, timeout=15)
-    resp.raise_for_status()
-    schema = resp.json()
-
     props = {}
     def collect_props(obj):
         if not isinstance(obj, dict):
             return
+        required = set(obj.get('required', []))
         for field_name, field_def in obj.get('properties', {}).items():
             if not isinstance(field_def, dict):
                 continue
             entry = {}
-            if 'enum' in field_def:
-                entry['enum'] = field_def['enum']
-                entry['type'] = 'enum'
-            else:
-                for sub_key in ('anyOf', 'oneOf'):
-                    for sub in field_def.get(sub_key, []):
-                        if 'enum' in sub:
-                            entry['enum'] = sub['enum']
-                            entry['type'] = 'enum'
-                if 'type' not in entry:
-                    entry['type'] = field_def.get('type', 'string')
+            # Enums may sit on the field itself, under anyOf/oneOf, or — for
+            # multivalued (array) fields like diseaseFocus, dataType, cellType —
+            # under 'items'. Check all of them.
+            candidates = [field_def] + field_def.get('anyOf', []) + field_def.get('oneOf', [])
+            for cand in candidates:
+                if not isinstance(cand, dict):
+                    continue
+                for node in (cand, cand.get('items', {})):
+                    if isinstance(node, dict) and 'enum' in node:
+                        entry['enum'] = node['enum']
+                        entry['type'] = 'enum'
+                        break
+                if 'enum' in entry:
+                    break
+            if 'type' not in entry:
+                entry['type'] = field_def.get('type', 'string')
+            entry['is_array'] = field_def.get('type') == 'array'
+            entry['required'] = field_name in required
             entry['description'] = field_def.get('description', '')
             props[field_name] = entry
         for defs_key in ('definitions', '$defs'):
@@ -538,10 +569,28 @@ def fetch_schema_properties(schema_uri: str) -> dict:
     collect_props(schema)
     return props
 
+
+def fetch_schema_properties(schema_uri: str) -> dict:
+    """
+    Fetch a registered schema from Synapse and return its properties
+    (see schema_properties_from_json for the entry format).
+    Use this to know which fields exist — then populate as many as source data supports.
+    """
+    url = f'https://repo-prod.prod.sagebase.org/repo/v1/schema/type/registered/{schema_uri}'
+    resp = httpx.get(url, timeout=15)
+    resp.raise_for_status()
+    return schema_properties_from_json(resp.json())
+
+
+def schema_required(props: dict) -> list[str]:
+    """The schema's `required` array, from fetch_schema_properties() output."""
+    return sorted(k for k, v in props.items() if v.get('required'))
+
 # Usage:
 schema_props = fetch_schema_properties(schema_uri)
 # schema_props is the ground truth — only set fields that appear here
 print(f"  Schema has {len(schema_props)} properties: {sorted(schema_props.keys())}")
+print(f"  Required: {schema_required(schema_props)}")
 ```
 
 ### Step B — Extract raw metadata from ALL source types
@@ -817,11 +866,22 @@ syn.restPUT(f'/entity/{project_id}/annotations2', json.dumps(ann))
 1. **PubMed GrantList** (most reliable): `grants = art.get('GrantList', [])` → `{g.get('Agency') for g in grants}`
 2. **Acknowledgements section**: look for "funded by", "supported by" phrases
 3. **Repository metadata**: Zenodo records sometimes list funders in `metadata.grants`
-4. **Fallback**: a "not applicable" placeholder — set the specific string from your portal's controlled vocabulary
+4. **Fallback**: `Other` — only after steps 1–3 found nothing. Name this in the GitHub curation comment.
+
+`fundingAgency` on the project is **free text** (`PortalStudy.fundingAgency` is an unconstrained string): write the verbatim agency names you found (e.g. `National Cancer Institute`, `Children's Tumor Foundation`), not grant IDs. When the funder is unknown, write `Other`. Never write a "Not Applicable" string — it maps to nothing in `FundingAgencyEnum` (`CTF`, `GFF`, `Independent`, `NIH-NCI`, `NTAP`, `Other`).
 
 **Study completion status**: Always set to the "completed" value for published studies with deposited data. Never "active" or "in progress" for public archival deposits.
 
-**Assay/data type vocabulary**: Read valid values from the schema enum at runtime — do not hardcode. Infer the category from the repository's library strategy or assay description.
+**Project-level controlled vocabulary** (`diseaseFocus`, `manifestation`, `dataType`): fetch from the PortalStudy class at runtime — never from `config/settings.yaml`, and never from memory:
+
+```python
+study_props = fetch_schema_properties('org.synapse.nf-portalstudy')
+valid_disease_focus  = study_props['diseaseFocus']['enum']    # DiseaseFocusEnum
+valid_manifestation  = study_props['manifestation']['enum']   # ManifestationEnum
+valid_data_type      = study_props['dataType']['enum']        # Data enum
+```
+
+Map every value through `validate_against_enum()` (`prompts/annotation_gap_fill.md`) and store its return value. `dataType` values are spaced lowercase (`gene expression`, `genomic variants`, `aligned reads`) — never camelCase. Infer the category from the repository's library strategy or assay description, not the paper title.
 
 ---
 
@@ -1439,6 +1499,342 @@ Validation warnings are expected at this stage — some required fields can only
 
 ---
 
+## Dataset Entity Annotations — Schema-Driven
+
+Dataset-entity annotations are driven by the registered **`PortalDatasetCandidate`** class (`synapse.schema.dataset_schema_uri` in `config/settings.yaml`), the same way File annotations are driven by the bound template. **There is no hardcoded Dataset key list anywhere** — the keys written are exactly the schema's properties that the source data supports, and the schema's `required` array is the completeness check.
+
+Define `schema_properties_from_json()` / `fetch_schema_properties()` / `schema_required()` (Step A2 above), `validate_against_enum()` (`prompts/annotation_gap_fill.md`), `REPO_TO_PREFIX` / `REPO_DISPLAY_NAME` (CLAUDE.md), and `REPO_LANDING_URL` (`prompts/repo_apis.md`) in the same script.
+
+### `resolve_dataset_schema()` — three tiers, never a hardcoded fallback
+
+Call once per run and reuse the result for every dataset.
+
+1. **Synapse registry** → use it; `source='synapse'`, schema can be bound.
+2. **GitHub raw** (registry non-200 or timeout) → `source='github-raw'`. Print this in the run log **and** record it in the GitHub curation comment. **Do not bind** — an unregistered URI cannot be bound.
+3. **Both fail** → `source=None`. For each dataset: still create the entity, write **no** annotations, log `DATASET_SCHEMA_UNAVAILABLE`, and let audit Phase 1 route it to `reasoning_gaps`.
+
+**Never fall back to a hardcoded key set.** A silent fallback is exactly how the old Dataset key lists drifted from the data model.
+
+```python
+import httpx, re, json
+
+REGISTRY = 'https://repo-prod.prod.sagebase.org/repo/v1/schema/type/registered'
+
+def resolve_dataset_schema(cfg: dict) -> dict:
+    """
+    Returns {'source': 'synapse'|'github-raw'|None, 'schema_uri', 'schema_id',
+             'document' (raw JSON schema), 'props' (schema_properties_from_json), 'error'}.
+    """
+    sc  = cfg['synapse']['schema']
+    uri = sc['dataset_schema_uri']
+    out = {'source': None, 'schema_uri': uri, 'schema_id': None,
+           'document': None, 'props': None, 'error': None}
+
+    # Tier 1 — Synapse registry
+    try:
+        r = httpx.get(f'{REGISTRY}/{uri}', timeout=15)
+        if r.status_code == 200:
+            doc = r.json()
+            out.update(source='synapse', document=doc, schema_id=doc.get('$id', uri),
+                       props=schema_properties_from_json(doc))
+            return out
+        errors = [f'registry HTTP {r.status_code}']
+    except httpx.HTTPError as e:
+        errors = [f'registry {type(e).__name__}']
+
+    # Tier 2 — GitHub raw. Raw paths are case-sensitive (PortalDatasetCandidate.json) while
+    # the URI is lowercase, so resolve the file name from the directory listing.
+    try:
+        suffix = uri[len(sc['uri_prefix']):].lower()
+        listing = httpx.get(sc['metadata_dictionary_url'], timeout=15)
+        listing.raise_for_status()
+        fname = next(f['name'] for f in listing.json()
+                     if f['name'].lower() == f'{suffix}.json')
+        r = httpx.get(f"{sc['raw_schema_base_url']}/{fname}", timeout=15)
+        r.raise_for_status()
+        doc = r.json()
+        out.update(source='github-raw', document=doc, schema_id=doc.get('$id', uri),
+                   props=schema_properties_from_json(doc))
+        print(f"  WARNING: dataset schema served from GitHub raw ({fname}); "
+              f"registry unavailable ({errors[0]}). Annotating without binding.")
+        return out
+    except (httpx.HTTPError, StopIteration, KeyError, ValueError) as e:
+        errors.append(f'github-raw {type(e).__name__}: {e}')
+
+    # Tier 3 — fail explicitly. Callers must NOT write any annotations.
+    out['error'] = '; '.join(errors)
+    print(f"  ERROR: DATASET_SCHEMA_UNAVAILABLE — {out['error']}")
+    return out
+```
+
+### Value derivation
+
+Each schema field is derived from a **dataset context** (`ctx`) assembled at Step 6 of `prompts/daily_task_template.md`, after relevance scoring. The derivers below say *how* to compute a field; *whether* it is written is decided by the schema — a deriver for a field the schema does not define is ignored, and a required field with no deriver or no value is reported as missing.
+
+| `ctx` key | Source |
+|---|---|
+| `title` | Dataset entity name (Step 2 above) |
+| `accession_id`, `source_repository` | publication group dataset |
+| `landing_url` | `REPO_LANDING_URL` (`prompts/repo_apis.md`) — or the repository record URL if you already have it |
+| `n_direct_files` | File entities pointing at direct download URLs |
+| `has_landing_link` | `True` if a landing-page link was created (enumeration failed or controlled access) |
+| `access_type` | publication group `access_type` (`open` / `controlled`), if known |
+| `data_type`, `disease_focus`, `manifestation` | Same values as the project (already `Data` / `DiseaseFocusEnum` / `ManifestationEnum`); `data_type` should reflect *this* dataset's library metadata in multi-assay studies |
+| `species`, `assay` | This dataset's files (repository taxon / library metadata) |
+| `creator` | PubMed AuthorList — first + last/corresponding author, `Firstname Lastname`. **No PMID:** GEO `!Series_contributor` → ENA `center_name` → Zenodo/figshare `creators[]` → SRA submitter, and flag in the curation comment |
+| `funder_agencies` | Verbatim agency strings: PubMed GrantList `Agency` → PMC Acknowledgements → CrossRef `funder` (same strings written to project `fundingAgency`) |
+| `grant_ids` | PubMed GrantList `GrantID` values |
+| `no_external_funding` | `True` only if the paper explicitly states no external funding |
+| `license_raw` | Repository record license (Zenodo `metadata.license.id`, figshare `license.name`, Dryad = CC0). GEO/SRA/ENA/dbGaP/EGA have none → leave `None` |
+| `dataset_doi` | DOI of the **data deposit** (Zenodo/figshare/Dryad/DataCite) — never the paper DOI |
+| `publication_doi` | Paper DOI (written as `citation`) |
+| `description` | Dataset description from Step 2 |
+
+**Rules for the fields that need judgment:**
+
+- **`funder`** (`FundingAgencyEnum`, multivalued): CTF → `CTF`; Gilbert Family Foundation → `GFF`; NTAP → `NTAP`; NCI, or an NIH grant with the `CA` activity code → `NIH-NCI`; **any other NIH institute (NINDS, NICHD, NHGRI…) → `Other`, never `NIH-NCI`**; explicit no external funding → `Independent`; anything else, and nothing found → `Other`. Keep multiple values (`["NIH-NCI", "Other"]`) rather than collapsing. The verbatim strings stay on project `fundingAgency`, so nothing is lost.
+- **`license`**: exact match only, else `UNKNOWN`. Never infer a license from the paper's open-access status, and never fuzzy-match (`CC BY` must not become `CC BY-NC`).
+- **`accessType`**: describes the **source repository's** access model, not the Synapse ACL (the candidate project is private until approval). dbGaP/EGA or `access_type == 'controlled'` → `Controlled Access`; everything else → `Open Access`.
+- **`hosting`**: NADIA never uploads bytes, so `synapse` and `external-cloud` never apply.
+
+  | Situation | `hosting` |
+  |---|---|
+  | Direct-download File entities only (normal path) | `external-download` |
+  | Single landing-page link — controlled access (dbGaP/EGA) **or** enumeration failed | `external-access` |
+  | Direct files plus a landing-page link | `mixed` |
+  | No files and no landing page | `unavailable` |
+
+  Failed enumeration is `external-access`, not `unavailable` — a landing page exists to link out to. The `file-enumeration-required` flag stays separate (it is a completeness defect, not a hosting value). Audit Phase 1 re-derives `hosting` from the actual files folder, so it flips to `external-download` once enumeration later succeeds.
+- **`resourceStatus`**: the schema's pending-review value (`pending-review`), looked up from the enum — not the project-level `pendingReview` string.
+- **`studyId`**: never set here — it only exists once the study is provisioned (`scripts/provision_approved_study.py`).
+
+```python
+CONTROLLED_ACCESS_REPOS = {'dbGaP', 'EGA'}
+NCI_GRANT_RE = re.compile(r'(?<![A-Z])CA\s*-?\d{6}')   # NIH activity code CA = NCI, e.g. R01 CA123456
+
+def _canon(s) -> str:
+    return re.sub(r'[^a-z0-9.]', '', str(s).lower())
+
+def map_funder_enum(agencies, grant_ids=(), no_external_funding=False) -> tuple[list[str], bool]:
+    """Map verbatim funder strings to FundingAgencyEnum values. Returns (values, used_default)."""
+    out, generic_nih = [], False
+    def add(v):
+        if v not in out:
+            out.append(v)
+    for a in agencies or []:
+        al = a.lower()
+        if re.search(r"children'?s tumou?r foundation|\bctf\b", al):
+            add('CTF')
+        elif re.search(r'gilbert family foundation|\bgff\b', al):
+            add('GFF')
+        elif re.search(r'neurofibromatosis therapeutic acceleration|\bntap\b', al):
+            add('NTAP')
+        elif re.search(r'national cancer institute|\bnci\b', al):
+            add('NIH-NCI')
+        elif re.search(r'\bnih\b|national institutes? of health', al) and not re.search(
+                r'\bnin?ds\b|\bnichd\b|\bnhgri\b|\bnhlbi\b|\bniaid\b|\bnimh\b|\bnia\b|\bnei\b|'
+                r'\bniams\b|\bnidcd\b|\bnigms\b|\bnibib\b|\bniddk\b|\bncats\b|national institute of (?!health)', al):
+            generic_nih = True          # institute unknown — decide from grant IDs below
+        else:
+            add('Other')                # includes NINDS, NICHD, DoD, foreign agencies, ...
+    has_nci_grant = any(NCI_GRANT_RE.search(str(g).upper()) for g in grant_ids or [])
+    if has_nci_grant:
+        add('NIH-NCI')
+    elif generic_nih:
+        add('Other')
+    if not out:
+        add('Independent' if no_external_funding else 'Other')
+        return out, not no_external_funding
+    return out, False
+
+def derive_hosting(n_direct_files: int, has_landing_link: bool) -> str:
+    if n_direct_files and has_landing_link:
+        return 'mixed'
+    if n_direct_files:
+        return 'external-download'
+    if has_landing_link:
+        return 'external-access'
+    return 'unavailable'
+
+def _external_repository_uri(ctx):
+    prefix = REPO_TO_PREFIX.get(ctx.get('source_repository', ''))
+    if prefix and ctx.get('accession_id'):
+        return f"{prefix}:{ctx['accession_id']}"
+    if ctx.get('dataset_doi'):                      # DataCite-indexed repos without a prefix
+        return f"doi:{ctx['dataset_doi']}"
+    return None
+
+def _external_url(ctx):
+    if ctx.get('landing_url'):
+        return ctx['landing_url']
+    tpl = REPO_LANDING_URL.get(ctx.get('source_repository', ''))
+    if tpl and ctx.get('accession_id'):
+        return tpl.format(acc=ctx['accession_id'])
+    return f"https://doi.org/{ctx['dataset_doi']}" if ctx.get('dataset_doi') else None
+
+# How to derive each field. Only fields present in the schema are ever written.
+DATASET_FIELD_DERIVERS = {
+    'title':                 lambda c: c.get('title'),
+    'description':           lambda c: (c.get('description') or '')[:500] or None,
+    'resourceStatus':        lambda c: 'pending-review',
+    'externalRepositoryUri': _external_repository_uri,
+    'repository':            lambda c: REPO_DISPLAY_NAME.get(c.get('source_repository'), c.get('source_repository')),
+    'externalUrl':           _external_url,
+    'hosting':               lambda c: derive_hosting(c.get('n_direct_files', 0), c.get('has_landing_link', False)),
+    'accessType':            lambda c: ('Controlled Access'
+                                        if c.get('access_type') == 'controlled'
+                                        or c.get('source_repository') in CONTROLLED_ACCESS_REPOS
+                                        else 'Open Access'),
+    'dataType':              lambda c: c.get('data_type'),
+    'diseaseFocus':          lambda c: c.get('disease_focus'),
+    'manifestation':         lambda c: c.get('manifestation'),
+    'species':               lambda c: c.get('species'),
+    'measurementTechnique':  lambda c: c.get('assay'),
+    'creator':               lambda c: c.get('creator'),
+    'funder':                lambda c: map_funder_enum(c.get('funder_agencies'), c.get('grant_ids'),
+                                                       c.get('no_external_funding', False))[0],
+    'license':               lambda c: c.get('license_raw'),
+    'doi':                   lambda c: c.get('dataset_doi'),
+    'citation':              lambda c: f"https://doi.org/{c['publication_doi']}" if c.get('publication_doi') else None,
+    'specimenCount':         lambda c: c.get('specimen_count'),
+    'individualCount':       lambda c: c.get('individual_count'),
+    # studyId intentionally has no deriver — only known at provisioning time.
+}
+
+
+def build_dataset_annotations(ctx: dict, props: dict) -> dict:
+    """
+    Derive Dataset annotation values for every schema property the context supports.
+    Returns {'values', 'defaults_used', 'dropped_invalid', 'missing_required'}.
+    """
+    values, defaults_used, dropped = {}, [], []
+    for field, prop in props.items():
+        derive = DATASET_FIELD_DERIVERS.get(field)
+        raw = derive(ctx) if derive else None
+        if raw in (None, '', []):
+            continue
+        items = raw if isinstance(raw, list) else [raw]
+        enum = prop.get('enum')
+        if enum:
+            if field in ('license', 'resourceStatus'):
+                # exact (canonicalized) match only — no fuzzy matching for these
+                lookup = {_canon(e): e for e in enum}
+                mapped = [lookup.get(_canon(v)) for v in items]
+            else:
+                mapped = [validate_against_enum(str(v), prop) for v in items]
+            dropped += [f'{field}={v!r}' for v, m in zip(items, mapped) if m is None]
+            items = list(dict.fromkeys(m for m in mapped if m is not None))
+        if not items:
+            continue
+        values[field] = items if prop.get('is_array') else items[0]
+
+    # Documented defaults — recorded so the curation comment can name them
+    if 'license' in props and 'license' not in values and 'UNKNOWN' in (props['license'].get('enum') or []):
+        values['license'] = 'UNKNOWN'
+        defaults_used.append('license=UNKNOWN')
+    if 'funder' in values:
+        _, used_default = map_funder_enum(ctx.get('funder_agencies'), ctx.get('grant_ids'),
+                                          ctx.get('no_external_funding', False))
+        if used_default or 'Other' in values['funder']:
+            defaults_used.append(f"funder includes Other (verbatim: {ctx.get('funder_agencies') or 'none found'})")
+
+    missing = [f for f in schema_required(props) if f not in values]
+    return {'values': values, 'defaults_used': defaults_used,
+            'dropped_invalid': dropped, 'missing_required': missing}
+
+
+def _ann_entry(value, prop) -> dict:
+    vals = value if isinstance(value, list) else [value]
+    if prop.get('type') == 'integer':
+        return {'type': 'LONG', 'value': [str(int(v)) for v in vals]}
+    return {'type': 'STRING', 'value': [str(v) for v in vals]}
+
+
+def annotations_to_instance(annotations: dict, props: dict) -> dict:
+    """Convert annotations2 entries to a JSON instance shaped like the schema expects."""
+    instance = {}
+    for k, v in annotations.items():
+        vals = v['value']
+        if v.get('type') == 'LONG':
+            vals = [int(x) for x in vals]
+        instance[k] = vals if props.get(k, {}).get('is_array') else vals[0]
+    return instance
+
+
+def annotate_dataset_entity(syn, dataset_id: str, ctx: dict, ds_schema: dict,
+                            only_missing: bool = False, always_refresh=('hosting',)) -> dict:
+    """
+    Merge schema-derived annotations into a Dataset entity (never replaces the dict).
+    only_missing=True (audit): fill absent fields only, except `always_refresh` fields,
+    which are re-derived from the current state of the files folder.
+    """
+    report = {'dataset_id': dataset_id, 'schema_source': ds_schema['source'],
+              'schema_id': ds_schema['schema_id']}
+    if ds_schema['props'] is None:
+        report.update(status='DATASET_SCHEMA_UNAVAILABLE', error=ds_schema['error'])
+        return report                       # Tier 3: write nothing, never guess keys
+
+    built = build_dataset_annotations(ctx, ds_schema['props'])
+    ann = syn.restGET(f'/entity/{dataset_id}/annotations2')
+    current = ann.get('annotations', {})
+    written = []
+    for field, value in built['values'].items():
+        entry = _ann_entry(value, ds_schema['props'][field])
+        if only_missing and field in current and field not in always_refresh:
+            continue
+        if current.get(field, {}).get('value') == entry['value']:
+            continue
+        current[field] = entry
+        written.append(field)
+    ann['annotations'] = current
+    if written:
+        syn.restPUT(f'/entity/{dataset_id}/annotations2', json.dumps(ann))
+
+    # Validate the full annotation set locally against the resolved schema document
+    from jsonschema import Draft7Validator
+    instance = annotations_to_instance(current, ds_schema['props'])
+    errors = sorted(e.message for e in Draft7Validator(ds_schema['document']).iter_errors(instance))
+
+    report.update(status='ok', written=written, validation_errors=errors, **built)
+    return report
+
+
+def dataset_context_from_project(project_ann: dict, proj: dict, ds: dict) -> dict:
+    """
+    Audit fallback when created_projects.json has no `dataset_context`: rebuild the
+    context from the project's current annotations and the dataset record.
+    """
+    return {
+        'accession_id':      ds.get('accession_id'),
+        'source_repository': ds.get('source_repository'),
+        'landing_url':       ds.get('landing_url'),
+        'access_type':       ds.get('access_type'),
+        'license_raw':       ds.get('license_raw'),
+        'dataset_doi':       ds.get('dataset_doi'),
+        'data_type':         project_ann.get('dataType'),
+        'disease_focus':     project_ann.get('diseaseFocus'),
+        'manifestation':     project_ann.get('manifestation'),
+        'creator':           project_ann.get('studyLeads'),
+        'funder_agencies':   [a for a in project_ann.get('fundingAgency', []) if a != 'Other'],
+        'grant_ids':         proj.get('grant_ids', []),
+        'publication_doi':   proj.get('doi'),
+    }
+
+
+def bind_dataset_schema(syn, dataset_id: str, ds_schema: dict) -> None:
+    """
+    Bind PortalDatasetCandidate to the Dataset entity — registry tier only.
+    Provisioning rebinds to PortalDataset after setting studyId (see #358).
+    """
+    if ds_schema['source'] != 'synapse':
+        return                              # github-raw / unavailable: cannot bind
+    syn.service('json_schema').bind_json_schema(ds_schema['schema_uri'], dataset_id)
+```
+
+**Reporting.** Store each `annotate_dataset_entity()` report on the dataset's `created_projects.json` record as `dataset_annotation_report`. The GitHub curation comment must state, per dataset: `schema_source` (and `schema_id`), every entry in `defaults_used` (e.g. `license=UNKNOWN`, `funder` rolled up to `Other` with the verbatim agencies), every `dropped_invalid` value, every `missing_required` field with the reason, and any `validation_errors`. A `DATASET_SCHEMA_UNAVAILABLE` dataset goes under "Items for human review".
+
+---
+
 ## Self-Audit and Remediation
 
 Run this after Step 6 (project creation) and before JIRA notifications. The audit is three phases:
@@ -1453,7 +1849,7 @@ These issues were discovered when the audit was run on real agent-created projec
 
 1. **All file annotations were missing** — projects created before the annotation step was enforced had zero file-level annotations. The audit auto-fix sweep adds the mechanical fields; the reasoning pass adds domain-knowledge fields. → Standard 1 (fetch schema first)
 
-2. **`manifestation='Unspecified'` is not valid portal vocabulary** — treat it the same as missing. Check the `annotations.manifestation_values` list in `config/settings.yaml` for valid values. → Standard 9 (vocabulary gaps: flag, don't silently drop)
+2. **`manifestation='Unspecified'` is not valid portal vocabulary** — treat it the same as missing. Check `ManifestationEnum` via `fetch_schema_properties('org.synapse.nf-portalstudy')['manifestation']['enum']` for valid values. → Standard 9 (vocabulary gaps: flag, don't silently drop)
 
 3. **`studyLeads=['Unknown']` — search PubMed first** — ENA projects without a PMID often have an associated publication findable via title search. Include `instrument_model`, center name, and key terms in the query. → Standard 3 (investigator fields: use paper authors, not repository submitters)
 
@@ -1523,6 +1919,7 @@ Step 6 must write this file. The audit reads it:
     "pmid": "31595648",
     "doi": "10.1038/s41436-019-0691-3",
     "pub_group_id": "pmid_31595648",
+    "grant_ids": ["R01 CA123456"],
     "abstract": "...",
     "outcome": "NEW",
     "datasets": [
@@ -1532,7 +1929,18 @@ Step 6 must write this file. The audit reads it:
         "schema_uri": "<uri_prefix>bulksequencingassaytemplate",
         "files_folder_id": "syn74287504",
         "dataset_id": "syn74287503",
-        "landing_url": "https://zenodo.org/records/4688881"
+        "landing_url": "https://zenodo.org/records/4688881",
+        "access_type": "open",
+        "license_raw": "cc-by-4.0",
+        "dataset_doi": "10.5281/zenodo.4688881",
+        "dataset_context": { "...": "the ctx passed to annotate_dataset_entity() in Step 3" },
+        "dataset_annotation_report": {
+          "status": "ok", "schema_source": "synapse",
+          "schema_id": "https://repo-prod.prod.sagebase.org/repo/v1/schema/type/registered/org.synapse.nf-portaldatasetcandidate",
+          "written": ["title", "hosting", "..."],
+          "defaults_used": ["license=UNKNOWN"],
+          "dropped_invalid": [], "missing_required": [], "validation_errors": []
+        }
       }
     ]
   }
@@ -1596,6 +2004,14 @@ for prop_name, prop_def in schema_props.items():
     size = 256 if prop_def.get('maxLength', 64) > 128 else (128 if prop_def.get('maxLength', 64) > 64 else 64)
     ANNOTATION_COLUMNS.append((prop_name, 'STRING', size, facet))
 
+# Dataset-entity schema (PortalDatasetCandidate) — resolved once per audit run.
+# Define resolve_dataset_schema(), annotate_dataset_entity() and dataset_context_from_project()
+# from "Dataset Entity Annotations — Schema-Driven" in this file.
+import yaml
+with open('config/settings.yaml') as _f:
+    cfg = yaml.safe_load(_f)
+DS_SCHEMA = resolve_dataset_schema(cfg)
+
 # Fields auto-fixable without reasoning (value is deterministic)
 AUTO_FIX_PROJECT = {
     'studyStatus':    'Completed',
@@ -1650,8 +2066,9 @@ for proj in created:
             result['fixes_applied'].append('project.studyName set from project_name')
 
         if 'fundingAgency' not in cur:
-            updates['fundingAgency'] = {'type': 'STRING', 'value': ['Not Applicable (External Study)']}
-            result['fixes_applied'].append('project.fundingAgency → Not Applicable (External Study)')
+            # Last-resort placeholder; Phase 2 should replace it from GrantList / PMC Acknowledgements
+            updates['fundingAgency'] = {'type': 'STRING', 'value': ['Other']}
+            result['fixes_applied'].append('project.fundingAgency → Other (funder unknown — resolve in Phase 2)')
 
         if pmid and 'pmid' not in cur:
             updates['pmid'] = {'type': 'STRING', 'value': [pmid]}
@@ -1734,6 +2151,13 @@ for proj in created:
         result['warnings'].append(f'Source Metadata check failed: {e}')
 
     # ── 4. Per-dataset audit ───────────────────────────────────────
+    # Project annotations as they are now (after section 1 fixes) — fallback context
+    # for Dataset annotations when created_projects.json has no dataset_context
+    try:
+        project_cur = {k: v['value'] for k, v in
+                       syn.restGET(f'/entity/{project_id}/annotations2').get('annotations', {}).items()}
+    except Exception:
+        project_cur = {}
     for ds in datasets:
         acc             = ds.get('accession_id', '')
         repo            = ds.get('source_repository', '')
@@ -1744,6 +2168,7 @@ for proj in created:
         print(f"\n  Dataset: {repo}:{acc}")
 
         # 4a. List files
+        landing_detected = False   # feeds Dataset `hosting` re-derivation in 4d
         try:
             file_children = list(syn.getChildren(files_folder_id, includeTypes=['file']))
             print(f"    Files: {len(file_children)}")
@@ -1770,6 +2195,7 @@ for proj in created:
                         or (not path_ext and sole_url)  # URL with no file extension
                     )
                     if is_landing:
+                        landing_detected = True
                         result['warnings'].append(
                             f'{acc}: LANDING_PAGE_FALLBACK — files folder contains only a '
                             f'landing-page link ({sole_url[:120]}). '
@@ -2060,27 +2486,35 @@ for proj in created:
                 else:
                     print(f"    Dataset name: OK ('{ds_name[:60]}')")
 
-                # Dataset annotations
-                ds_ann = syn.restGET(f'/entity/{dataset_id}/annotations2')
-                ds_cur  = {k: v['value'] for k, v in ds_ann.get('annotations', {}).items()}
-                ds_upd  = {}
-                defaults = {
-                    'contentType':         ['dataset'],
-                    'resourceStatus':      ['pendingReview'],
-                    'externalAccessionID': [acc] if acc else None,
-                    'externalRepository':  [repo] if repo else None,
-                    'study':               [project_name] if project_name else None,
-                }
-                for k, v in defaults.items():
-                    if v and k not in ds_cur:
-                        ds_upd[k] = {'type': 'STRING', 'value': v}
-                if ds_upd:
-                    ds_ann['annotations'].update(ds_upd)
-                    syn.restPUT(f'/entity/{dataset_id}/annotations2', json.dumps(ds_ann))
-                    result['fixes_applied'].append(f'{acc}: Dataset annotations updated {list(ds_upd.keys())}')
-                    print(f"    Dataset annotations: FIXED {list(ds_upd.keys())}")
+                # Dataset annotations — same schema-driven builder as creation, so the two
+                # cannot disagree. Fill missing fields; re-derive `hosting` from the files
+                # folder as it is now (flips to external-download once enumeration succeeds).
+                ctx = dict(ds.get('dataset_context') or dataset_context_from_project(
+                    project_cur, proj, ds))
+                ctx['title'] = ds_body.get('name', ctx.get('title'))
+                ctx['n_direct_files'] = len(file_children) - (1 if landing_detected else 0)
+                ctx['has_landing_link'] = landing_detected
+                ds_report = annotate_dataset_entity(syn, dataset_id, ctx, DS_SCHEMA, only_missing=True)
+                result.setdefault('dataset_annotation_reports', []).append(
+                    {'accession_id': acc, **ds_report})
+                if ds_report['status'] == 'DATASET_SCHEMA_UNAVAILABLE':
+                    result['reasoning_gaps'].append({
+                        'scope': 'dataset', 'accession_id': acc, 'dataset_id': dataset_id,
+                        'field': 'dataset_annotations', 'note': 'DATASET_SCHEMA_UNAVAILABLE',
+                    })
+                    print(f"    Dataset annotations: DATASET_SCHEMA_UNAVAILABLE — flagged for Phase 2")
                 else:
-                    print(f"    Dataset annotations: OK")
+                    if ds_report['written']:
+                        result['fixes_applied'].append(f"{acc}: Dataset annotations updated {ds_report['written']}")
+                    for field in ds_report['missing_required']:
+                        result['reasoning_gaps'].append({
+                            'scope': 'dataset', 'accession_id': acc, 'dataset_id': dataset_id,
+                            'field': field, 'note': 'required by dataset schema',
+                        })
+                    if ds_report['validation_errors']:
+                        result['warnings'].append(f"{acc}: Dataset schema errors {ds_report['validation_errors']}")
+                    print(f"    Dataset annotations: source={ds_report['schema_source']} "
+                          f"written={ds_report['written']} missing={ds_report['missing_required']}")
 
             except Exception as e:
                 result['warnings'].append(f'{acc}: Dataset {dataset_id} check failed: {e}')
@@ -2209,8 +2643,9 @@ After running `audit.py`, read `{WORKSPACE_DIR}/audit_results.json`. For each pr
 1. **Read the available context** — project annotations (studyName, alternateDataRepository), the abstract stored in audit_results, and the wiki if it exists
 2. **If PMID is available and abstract is missing**, fetch it: `Entrez.efetch(db='pubmed', id=pmid, rettype='xml')`
 3. **Reason through each gap** using the publication title + abstract + repository metadata:
-   - `diseaseFocus`, `manifestation`: infer from disease mentions in abstract
-   - `dataType`: infer from assay type (scRNA-seq → `geneExpression`)
+   - `diseaseFocus`, `manifestation`: infer from disease mentions in abstract; values must come from `DiseaseFocusEnum` / `ManifestationEnum` in `org.synapse.nf-portalstudy`
+   - `dataType`: infer from assay type (scRNA-seq → `gene expression`); values must come from the `Data` enum in `org.synapse.nf-portalstudy`
+   - `fundingAgency`: if Phase 1 set the `Other` placeholder, try GrantList then PMC Acknowledgements and replace it with verbatim agency names
    - `studyLeads`: if PMID known, fetch AuthorList; take first + last author
    - `institutions`: from author affiliations in PubMed record
    - `alternateDataRepository`: reconstruct from accession_id + source_repository using REPO_TO_PREFIX
@@ -2219,6 +2654,8 @@ After running `audit.py`, read `{WORKSPACE_DIR}/audit_results.json`. For each pr
    - `libraryPreparationMethod`: infer from abstract ("10x Chromium", "Smart-seq2", "polyA", etc.)
    - `specimenID` for files where auto-parse failed: look at repository sample table (GEO GSM list, SRA BioSample)
    - `wiki` missing: create using the wiki template from this file
+   - **Dataset gaps** (`scope: dataset`): for a field the Dataset schema requires (`creator`, `funder`, `dataType`, …), resolve the value using the derivation rules in "Dataset Entity Annotations — Schema-Driven" and write it under `dataset_annotation_fixes`. For `DATASET_SCHEMA_UNAVAILABLE`, do not guess keys — add the dataset to `retry_dataset_schema`; Phase 3 re-resolves the schema and runs the builder. If it is still unavailable, list the dataset under "Items for human review".
+   - **Dataset annotation reports** (`dataset_annotation_reports` in audit_results): carry `schema_source`, `defaults_used` (e.g. `license=UNKNOWN`, `funder` → `Other`), `dropped_invalid`, and remaining `missing_required` into the GitHub curation comment.
    - **`LANDING_PAGE_FALLBACK` warnings**: for each dataset flagged in Phase 1 warnings, add an item to the GitHub curation comment under "Items for human review": `file-enumeration-required — files folder contains only a landing-page link to {url}. Actual data files could not be enumerated. Manual re-enumeration or data linking needed.`
 4. **Write `{WORKSPACE_DIR}/audit_reasoning_fixes.json`** with all resolved values
 
@@ -2229,12 +2666,21 @@ After running `audit.py`, read `{WORKSPACE_DIR}/audit_results.json`. For each pr
     "project_annotation_fixes": {
       "diseaseFocus": ["Neurofibromatosis type 1"],
       "manifestation": ["Neurofibroma"],
-      "dataType": ["geneExpression"],
+      "dataType": ["gene expression"],
       "studyLeads": ["Smith J", "Doe A"],
       "institutions": ["University of X"],
       "alternateDataRepository": ["zenodo.record:4688881"]
     },
     "wiki_content": "## Clinical spectrum...\n\n...",
+    "dataset_annotation_fixes": [
+      {
+        "dataset_id": "syn74287503",
+        "annotations": {"creator": ["Jane Smith", "Alan Doe"]}
+      }
+    ],
+    "retry_dataset_schema": [
+      {"dataset_id": "syn74287503", "accession_id": "4688881"}
+    ],
     "file_annotation_fixes": [
       {
         "file_id": "syn74287506",
@@ -2271,6 +2717,15 @@ syn = get_synapse_client()
 
 with open('{WORKSPACE_DIR}/audit_reasoning_fixes.json') as f:
     fixes = json.load(f)
+with open('{WORKSPACE_DIR}/created_projects.json') as f:
+    created = json.load(f)
+
+# Define resolve_dataset_schema(), annotate_dataset_entity(), _ann_entry(), bind_dataset_schema(),
+# dataset_context_from_project() (this file) and validate_against_enum() (annotation_gap_fill.md).
+import yaml
+with open('config/settings.yaml') as _f:
+    cfg = yaml.safe_load(_f)
+DS_SCHEMA = resolve_dataset_schema(cfg)
 
 total_projects = 0
 total_files = 0
@@ -2301,6 +2756,41 @@ for proj_fix in fixes:
                 markdown=proj_fix['wiki_content'],
             ))
             print(f"  Wiki: created")
+
+    # Apply Dataset annotation fixes — keys must exist in the dataset schema; enum values
+    # are validated. Merged into existing annotations, never replacing the dict.
+    if proj_fix.get('dataset_annotation_fixes') or proj_fix.get('retry_dataset_schema'):
+        if DS_SCHEMA['props'] is None:
+            print(f"  Dataset fixes skipped: DATASET_SCHEMA_UNAVAILABLE ({DS_SCHEMA['error']})")
+        else:
+            for ds_fix in proj_fix.get('dataset_annotation_fixes', []):
+                ann = syn.restGET(f"/entity/{ds_fix['dataset_id']}/annotations2")
+                applied = []
+                for k, v in ds_fix['annotations'].items():
+                    prop = DS_SCHEMA['props'].get(k)
+                    if prop is None:
+                        print(f"  Dataset {ds_fix['dataset_id']}: {k} not in schema — skipped")
+                        continue
+                    vals = v if isinstance(v, list) else [v]
+                    if prop.get('enum'):
+                        vals = [m for m in (validate_against_enum(str(x), prop) for x in vals) if m]
+                    if vals:
+                        ann['annotations'][k] = _ann_entry(vals if prop.get('is_array') else vals[0], prop)
+                        applied.append(k)
+                syn.restPUT(f"/entity/{ds_fix['dataset_id']}/annotations2", json.dumps(ann))
+                print(f"  Dataset {ds_fix['dataset_id']}: annotations updated {applied}")
+            # Datasets whose schema was unavailable in Phase 1: run the builder now
+            for retry in proj_fix.get('retry_dataset_schema', []):
+                ds_rec = next((d for p in created for d in p.get('datasets', [])
+                               if d.get('dataset_id') == retry['dataset_id']), {})
+                ctx = ds_rec.get('dataset_context') or dataset_context_from_project(
+                    {k: v['value'] for k, v in
+                     syn.restGET(f'/entity/{project_id}/annotations2')['annotations'].items()},
+                    next(p for p in created if p['synapse_project_id'] == project_id), ds_rec)
+                rep = annotate_dataset_entity(syn, retry['dataset_id'], ctx, DS_SCHEMA, only_missing=True)
+                bind_dataset_schema(syn, retry['dataset_id'], DS_SCHEMA)
+                print(f"  Dataset {retry['dataset_id']}: schema retry → {rep['status']} "
+                      f"missing={rep.get('missing_required')}")
 
     # Apply file annotation fixes
     for file_fix in proj_fix.get('file_annotation_fixes', []):

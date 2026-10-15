@@ -62,24 +62,19 @@ synapse:
     uri_prefix: "org.synapse.nf-"
     # GitHub API URL listing available schema templates as JSON files
     metadata_dictionary_url: "https://api.github.com/repos/nf-osi/nf-metadata-dictionary/contents/registered-json-schemas"
+    # Registered schema that defines Dataset-entity annotations (see resolve_dataset_schema()
+    # in prompts/synapse_workflow.md). Its properties and `required` list drive what NADIA writes.
+    dataset_schema_uri: "org.synapse.nf-portaldatasetcandidate"
+    # Fallback source when the Synapse schema registry is unreachable. Fetched schemas from
+    # here are used for annotation only — they cannot be bound.
+    raw_schema_base_url: "https://raw.githubusercontent.com/nf-osi/nf-metadata-dictionary/main/registered-json-schemas"
 
-annotations:
-  # Portal-controlled vocabulary for disease focus annotation.
-  # Replace with valid values from your portal's annotation dictionary.
-  disease_focus_values:
-    - "Neurofibromatosis type 1"
-    - "Neurofibromatosis type 2"
-    - "Schwannomatosis"
-    - "MPNST"
-  # Portal-controlled vocabulary for disease manifestation annotation.
-  manifestation_values:
-    - "MPNST"
-    - "Plexiform Neurofibroma"
-    - "Low-Grade Glioma NOS"
-    - "Behavioral"
-    - "Cognition"
-    - "Memory"
-    - "Pain"
+# NOTE: Controlled vocabularies (diseaseFocus, manifestation, dataType) are NOT listed here —
+# they are fetched at runtime by calling
+# fetch_schema_properties('org.synapse.nf-portalstudy') on the registered PortalStudy schema.
+# The NF metadata dictionary is the authoritative source for valid values; a cached copy
+# here goes stale (e.g. the 2022 schwannomatosis nomenclature split). Do not maintain a
+# parallel vocabulary list here.
 
 curation_checklist:
   # Fields that must be set on the Synapse Project entity.
@@ -89,12 +84,12 @@ curation_checklist:
     - studyName           # expected: full publication title
     - studyStatus         # expected: Completed (for published studies)
     - dataStatus          # expected: Available
-    - diseaseFocus        # controlled vocabulary — see annotations.disease_focus_values
-    - manifestation       # controlled vocabulary — see annotations.manifestation_values
-    - dataType            # controlled vocabulary — assay category
+    - diseaseFocus        # controlled vocabulary — DiseaseFocusEnum (fetched at runtime, see NOTE above)
+    - manifestation       # controlled vocabulary — ManifestationEnum (fetched at runtime)
+    - dataType            # controlled vocabulary — Data enum, spaced lowercase (fetched at runtime)
     - studyLeads          # first + last/corresponding author (from PubMed, not repository submitter)
     - institutions        # author affiliations (max 500 chars total)
-    - fundingAgency       # from PubMed GrantList; fallback: "Not Applicable (External Study)"
+    - fundingAgency       # free text: verbatim agency names from GrantList / PMC Acknowledgements; fallback: Other
     - resourceStatus      # expected: pendingReview
     - alternateDataRepository  # list of prefix:accession strings
 
@@ -104,14 +99,10 @@ curation_checklist:
   # what values are valid, and which fields apply conditionally (e.g. model organism fields,
   # antibody assay fields). Do not maintain a parallel field list here.
 
-  # Fields that must be set as annotations on each Dataset entity.
-  required_dataset_annotations:
-    - contentType         # expected: dataset
-    - externalAccessionID
-    - externalRepository
-    - resourceStatus      # expected: pendingReview
-    - study               # project name
-    - studyId             # Synapse project ID
+  # NOTE: Dataset-entity annotation fields are NOT listed here either — they are determined
+  # at runtime from synapse.schema.dataset_schema_uri (PortalDatasetCandidate) via
+  # resolve_dataset_schema(). The schema's `required` list is the completeness check.
+  # Do not maintain a parallel field list here.
 
 
 notifications:

@@ -490,7 +490,7 @@ import json
 
 result = {
   "relevance_score": 0.92,
-  "disease_focus": ["NF1"],
+  "disease_focus": ["Neurofibromatosis type 1"],  # DiseaseFocusEnum values only
   "assay_types": ["RNA-seq"],
   "species": ["Mus musculus"],
   "tissue_types": ["bone marrow"],
@@ -560,12 +560,12 @@ Read `curation_checklist.required_project_annotations` from config for the full 
 | Study name / title | Full publication title | |
 | Study completion status | `Completed` for published studies | Never "Active" for deposited public data |
 | Data availability status | e.g. `Available` | |
-| Disease/topic focus | From `annotations.disease_focus_values` in config | Use controlled vocabulary only |
-| Disease manifestation/subtype | From `annotations.manifestation_values` in config | Use controlled vocabulary only |
+| Disease/topic focus | `DiseaseFocusEnum` from `org.synapse.nf-portalstudy`, fetched at runtime | Use controlled vocabulary only |
+| Disease manifestation/subtype | `ManifestationEnum` from `org.synapse.nf-portalstudy`, fetched at runtime | Use controlled vocabulary only |
 | Assay / data type category | Controlled vocabulary from schema | List; may cover multiple assay types |
 | Study leads / investigators | **From PubMed AuthorList** — first + last/corresponding author | NOT the repository submitter |
 | Author institutions | From PubMed author affiliations | Truncate to fit annotation length limits |
-| Funding agency | From PubMed GrantList; fallback to a "not applicable" placeholder | |
+| Funding agency | From PubMed GrantList, then PMC Acknowledgements; fallback `Other` | Free text — verbatim agency names. Never "Not Applicable" |
 | Resource / review status | `pendingReview` | Do NOT set `approved` — that's a human action |
 | External accessions | All related repository accessions as `prefix:accession` list | See `alternateDataRepository` prefixes section |
 | PMID | PubMed ID if available | |
@@ -612,7 +612,7 @@ Before writing any annotation, call `fetch_schema_properties(schema_uri)` to ret
 
 **If a field's enum list is empty (`"enum": []`), do not set that field at all — an empty enum means no valid value exists for it in the current schema version.** Setting a field with no valid enum values will always fail validation.
 
-**Config-provided vocabulary lists can lag the live portal.** For any controlled-vocabulary annotation (disease manifestation, disease focus, data type, etc.), verify current valid values by querying the live Synapse portal table at runtime rather than relying solely on values from `config/settings.yaml`. The portal table is authoritative; config values are a convenience cache that may be stale.
+**Project-level controlled vocabulary comes from the registered PortalStudy schema, not config.** For `diseaseFocus`, `manifestation`, and `dataType` — on projects and in relevance scoring — fetch valid values at runtime with `fetch_schema_properties('org.synapse.nf-portalstudy')` (`DiseaseFocusEnum`, `ManifestationEnum`, `Data`). `config/settings.yaml` deliberately holds no vocabulary lists: a cached list goes stale. `dataType` values are spaced lowercase (`gene expression`, `genomic variants`) — never camelCase.
 
 **Enum values are exact, including Unicode characters.** Schema controlled vocabularies may contain cell line names or biological terms with Unicode characters (Greek letters λ, α, β; subscripts; special punctuation). `HSC1λ` (lambda) ≠ `HSC1L` (letter L). When matching source metadata to schema enums:
 - Always compare character-for-character against values returned by `fetch_schema_properties()`
@@ -694,7 +694,7 @@ This comment is the handoff from autonomous annotation to human review. Without 
 After annotating files, run the full gap-fill algorithm from `prompts/annotation_gap_fill.md` before considering annotation done. The algorithm works through four tiers of sources in priority order — stopping at the first tier that yields a valid value for each missing field:
 
 - **Tier 1** — Structured repository metadata (ENA filereport with all columns, BioSample XML, ENA sample XML, GEO GSM characteristics, SRA RunInfo)
-- **Tier 2** — Publication metadata (PMC full text methods section, supplementary tables downloaded and parsed, CrossRef funder info). For `fundingAgency` specifically: if the PubMed GrantList is empty, the PMC full-text Acknowledgements section is a mandatory Tier 2 source — parse it for grant numbers, agency names (NIH, NSF, ERC, Wellcome, etc.), and foundation names before falling back to the "not applicable" placeholder. The placeholder is only appropriate when the paper is not in open-access PMC or when the Acknowledgements section genuinely contains no funding information.
+- **Tier 2** — Publication metadata (PMC full text methods section, supplementary tables downloaded and parsed, CrossRef funder info). For `fundingAgency` specifically: if the PubMed GrantList is empty, the PMC full-text Acknowledgements section is a mandatory Tier 2 source — parse it for grant numbers, agency names (NIH, NSF, ERC, Wellcome, etc.), and foundation names before falling back to the `Other` placeholder. The placeholder is only appropriate when the paper is not in open-access PMC or when the Acknowledgements section genuinely contains no funding information.
 - **Tier 3** — Text extraction via reasoning (abstract, methods section, supplementary table rows — extract unambiguous values only)
 - **Tier 4** — Data file inspection (h5ad/loom obs columns, BAM @RG tags, FASTQ headers, count matrix column headers)
 
@@ -755,10 +755,10 @@ Before filing the issue, verify that the following have been attempted and eithe
 **Publication metadata** (required when a PMID is available):
 - `studyLeads` / investigator field — must come from PubMed AuthorList (first + last/corresponding author). If the PMID was resolved after initial project scaffolding, re-derive these now rather than leaving "Unknown".
 - `institutions` / affiliations — must come from PubMed `AffiliationInfo` for the first and last/corresponding authors. Do not leave blank if a PMID is available.
-- `fundingAgency` — PubMed GrantList first, then PMC full-text Acknowledgements section (Tier 2), then placeholder only as last resort. "Unknown funding" from a paper in open-access PMC is not acceptable — parse the Acknowledgements.
+- `fundingAgency` — PubMed GrantList first, then PMC full-text Acknowledgements section (Tier 2), then `Other` only as last resort. "Unknown funding" from a paper in open-access PMC is not acceptable — parse the Acknowledgements.
 
 **Disease and biology annotations** (from abstract + methods reasoning):
-- `manifestation` values — apply all valid portal controlled vocabulary terms derivable from the abstract and paper methods. Do not leave blank when the disease manifestation is unambiguous. Fetch current valid values from the live portal table at runtime.
+- `manifestation` values — apply all valid portal controlled vocabulary terms derivable from the abstract and paper methods. Do not leave blank when the disease manifestation is unambiguous. Fetch current valid values from `ManifestationEnum` in `org.synapse.nf-portalstudy` at runtime.
 - `tumorType` and `diagnosis` — set from the study's sample description when unambiguous; do not leave blank if the sample type is clearly stated in the paper.
 
 **Assay type and schema selection** (from repository library metadata):
@@ -774,17 +774,9 @@ Only escalate items that are genuinely unresolvable through automated means: con
 
 ### Dataset Entity Level
 
-Read `curation_checklist.required_dataset_annotations` from config for the full field list. In every deployment, the Dataset entity captures the information needed to link it back to its project and source:
+**The registered `PortalDatasetCandidate` schema (`synapse.schema.dataset_schema_uri` in config) is the authoritative source for Dataset annotations** — the same model-driven approach as File annotations. Resolve it with `resolve_dataset_schema()` and write annotations with `annotate_dataset_entity()` (`prompts/synapse_workflow.md` → "Dataset Entity Annotations — Schema-Driven"). Populate every property the source supports; the schema's `required` array is the completeness check. There is no Dataset field list in config or here — do not write keys the schema does not define, and never fall back to a hardcoded key set if the schema cannot be fetched (log `DATASET_SCHEMA_UNAVAILABLE` instead).
 
-| Category | Value |
-|----------|-------|
-| Content type marker | e.g. `dataset` |
-| External accession ID | Repository accession for this dataset |
-| External repository | Source repository name |
-| Resource / review status | `pendingReview` |
-| Study / project link | Project name and Synapse project ID |
-| Publication title | Full title of the publication |
-| Study leads | List of investigators (first + corresponding author) |
+What the schema captures, broadly: title, the external record (`externalRepositoryUri` CURIE, `repository` display name, `externalUrl`), how files are reached (`hosting`, `accessType`), `dataType` / `diseaseFocus`, `creator` (paper authors, not repository submitters), `funder` (`FundingAgencyEnum`), `license` (default `UNKNOWN`), and `resourceStatus` (the schema's pending-review value). `studyId` is set only at provisioning.
 
 ### 15 — Spatial transcriptomics deposits: one Dataset entity, not two
 
@@ -879,34 +871,36 @@ Key patterns to apply from supplementary clinical tables:
 
 Format: `{prefix}:{accession_id}`. One entry per repository accession. Set as a list.
 
-| Repository | Prefix | Example |
-|-----------|--------|---------|
-| GEO | `geo` | `geo:GSE145064` |
-| SRA / INSDC | `insdc.sra` | `insdc.sra:SRP123456` |
-| BioProject | `bioproject` | `bioproject:PRJNA948468` |
-| ENA (European) | `insdc.sra` | `insdc.sra:PRJEB65920` |
-| dbGaP | `dbgap` | `dbgap:phs003519.v1.p1` |
-| EGA (study) | `ega.study` | `ega.study:EGAS00001006069` |
-| EGA (dataset) | `ega.dataset` | `ega.dataset:EGAD00001000123` |
-| ArrayExpress | `arrayexpress` | `arrayexpress:E-MTAB-6369` |
-| PRIDE | `pride.project` | `pride.project:PXD052910` |
-| MassIVE | `massive` | `massive:MSV000094567` |
-| MetaboLights | `metabolights` | `metabolights:MTBLS123` |
-| CELLxGENE | `cellxgene.collection` | `cellxgene.collection:{uuid}` |
-| cBioPortal | `cbioportal` | `cbioportal:schw_ctf_synodos_2025` |
-| Zenodo | `zenodo.record` | `zenodo.record:7012345` |
-| OSF | `osf` | `osf:abc12` |
-| NCI PDC | `pdc.study` | `pdc.study:PDC000123` |
-| Dryad | `dryad` | `dryad:dryad.abc123` |
-| Science Data Bank | `scidb` | `scidb:OA_0d24d3aa6238430a9f7ab564b36398d0` |
-| TIB (German Nat. Library) | `tib` | `tib:10.57702/4hwx66p6` |
-| Cell Image Library | `cil` | `cil:47049` |
-| NCI GDC | `gdc` | `gdc:TCGA-SARC` |
-| TCIA | `tcia.collection` | `tcia.collection:Vestibular-Schwannoma-SEG` |
+This table also feeds the Dataset entity: `externalRepositoryUri` is the same `{prefix}:{accession_id}` CURIE, and `repository` is the **display name** column (a CURIE prefix is not a label — `insdc.sra` displays as "SRA"). See "Dataset Entity Annotations — Schema-Driven" in `prompts/synapse_workflow.md`.
+
+| Repository | Prefix | Example | Display name (`repository`) |
+|-----------|--------|---------|------|
+| GEO | `geo` | `geo:GSE145064` | GEO |
+| SRA / INSDC | `insdc.sra` | `insdc.sra:SRP123456` | SRA |
+| BioProject | `bioproject` | `bioproject:PRJNA948468` | BioProject |
+| ENA (European) | `insdc.sra` | `insdc.sra:PRJEB65920` | ENA |
+| dbGaP | `dbgap` | `dbgap:phs003519.v1.p1` | dbGaP |
+| EGA (study) | `ega.study` | `ega.study:EGAS00001006069` | EGA |
+| EGA (dataset) | `ega.dataset` | `ega.dataset:EGAD00001000123` | EGA |
+| ArrayExpress | `arrayexpress` | `arrayexpress:E-MTAB-6369` | ArrayExpress |
+| PRIDE | `pride.project` | `pride.project:PXD052910` | PRIDE |
+| MassIVE | `massive` | `massive:MSV000094567` | MassIVE |
+| MetaboLights | `metabolights` | `metabolights:MTBLS123` | MetaboLights |
+| CELLxGENE | `cellxgene.collection` | `cellxgene.collection:{uuid}` | CELLxGENE |
+| cBioPortal | `cbioportal` | `cbioportal:schw_ctf_synodos_2025` | cBioPortal |
+| Zenodo | `zenodo.record` | `zenodo.record:7012345` | Zenodo |
+| OSF | `osf` | `osf:abc12` | OSF |
+| NCI PDC | `pdc.study` | `pdc.study:PDC000123` | PDC |
+| Dryad | `dryad` | `dryad:dryad.abc123` | Dryad |
+| Science Data Bank | `scidb` | `scidb:OA_0d24d3aa6238430a9f7ab564b36398d0` | Science Data Bank |
+| TIB (German Nat. Library) | `tib` | `tib:10.57702/4hwx66p6` | TIB |
+| Cell Image Library | `cil` | `cil:47049` | Cell Image Library |
+| NCI GDC | `gdc` | `gdc:TCGA-SARC` | GDC |
+| TCIA | `tcia.collection` | `tcia.collection:Vestibular-Schwannoma-SEG` | TCIA |
 
 Do NOT add `pubmed:{pmid}` — PubMed is not a data repository.
 
-**DataCite-indexed repos** (Science Data Bank, TIB, IFJ PAN, CORA, Iowa, Polish Academy, etc.) that lack a Bioregistry prefix: use `doi:{doi}` as the alternateDataRepository value.
+**DataCite-indexed repos** (Science Data Bank, TIB, IFJ PAN, CORA, Iowa, Polish Academy, etc.) and repositories without a Bioregistry prefix (figshare, Mendeley Data, OpenNeuro): use `doi:{doi}` as the alternateDataRepository / `externalRepositoryUri` value.
 
 ```python
 REPO_TO_PREFIX = {
@@ -920,6 +914,18 @@ REPO_TO_PREFIX = {
     'Science Data Bank': 'scidb', 'TIB': 'tib',
     'Cell Image Library': 'cil', 'NCI GDC': 'gdc',
     'TCIA': 'tcia.collection',
+}
+
+# Display label for the Dataset `repository` annotation (portal card label). Keys match REPO_TO_PREFIX.
+REPO_DISPLAY_NAME = {
+    'GEO': 'GEO', 'SRA': 'SRA', 'ENA': 'ENA', 'BioProject': 'BioProject',
+    'dbGaP': 'dbGaP', 'EGA': 'EGA', 'ArrayExpress': 'ArrayExpress',
+    'PRIDE': 'PRIDE', 'MassIVE': 'MassIVE', 'MetaboLights': 'MetaboLights',
+    'CELLxGENE': 'CELLxGENE', 'Zenodo': 'Zenodo', 'Figshare': 'figshare', 'OSF': 'OSF',
+    'PDC': 'PDC', 'cBioPortal': 'cBioPortal', 'Dryad': 'Dryad',
+    'Science Data Bank': 'Science Data Bank', 'TIB': 'TIB',
+    'Cell Image Library': 'Cell Image Library', 'NCI GDC': 'GDC', 'TCIA': 'TCIA',
+    'Mendeley Data': 'Mendeley Data', 'OpenNeuro': 'OpenNeuro',
 }
 
 alternate_data_repos = []
@@ -1094,7 +1100,7 @@ Before logging `synapse_created` or `dataset_added`, verify:
   - The field for study completion status = `Completed` (published studies are complete, never "Active")
   - The field for resource/review status = `pendingReview`
   - Investigator/author field derived from PubMed AuthorList, not repository submitter
-  - Funder field from PubMed GrantList; fallback to a "not applicable" placeholder value
+  - Funder field from PubMed GrantList, then PMC Acknowledgements; fallback `Other` (never a "Not Applicable" string)
 - [ ] `pmid` and `doi` set if available (these are standard regardless of schema)
 - [ ] Data manager team (`synapse.team_id` from config) has administrator permissions
 - [ ] Wiki created with title, abstract, datasets table, and plain-language summary
@@ -1116,7 +1122,7 @@ Before logging `synapse_created` or `dataset_added`, verify:
 - [ ] Dataset entity name is specific and informative — see naming guidance in `prompts/synapse_workflow.md`
 - [ ] Dataset entity `items` populated with all File entity IDs
 - [ ] Dataset entity `columnIds` starts with system `id` (ENTITYID) and `name` (STRING) columns, then all annotation columns — data managers expect column order: id | name | annotations
-- [ ] All fields in `curation_checklist.required_dataset_annotations` set on the Dataset entity
+- [ ] Every field in the `PortalDatasetCandidate` schema's `required` array set on the Dataset entity (or listed under `missing_required` in the curation comment), and `schema_source` recorded
 - [ ] Stable version minted on Dataset entity via `POST /entity/{id}/version` **after all annotation fixes are applied** (Phase 3, not creation)
 - [ ] Metadata schema bound to the **files folder** (not the Dataset entity, not the project) via `bind_json_schema(schema_uri, files_folder_id)`
 - [ ] Schema binding verified
