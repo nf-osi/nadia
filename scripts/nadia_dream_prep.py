@@ -345,8 +345,9 @@ Good targets include:
 - Improving the annotation gap-fill tiers for sources that are consistently useful
 
 **Do not** make speculative refactors or changes unrelated to observed errors.
-**Do not** change `config/settings.yaml` annotation vocabulary — vocabulary
-changes require a separate DCC review process.
+**Do not** change `config/settings.yaml`, and do not add controlled vocabulary
+lists anywhere — vocabularies come from the NF metadata dictionary schemas at
+runtime, and changes to them go through the dictionary's own review process.
 
 ### Step 4 — Create a pull request
 

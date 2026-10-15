@@ -22,7 +22,7 @@ These Synapse tables are the live data portal. You may query them with SELECT st
 Your write scope: (a) new Synapse projects you create this run, (b) the two state tables under `STATE_PROJECT_ID`, (c) adding new dataset folders to existing projects that the agent itself previously created (identified by `synapse_project_id` in the state table).
 
 **Rule 3 — Never change `resourceStatus` on existing projects.**
-You only ever set `resourceStatus = pendingReview` on new projects or datasets you create/add. Transitions to `approved` or `rejected` are made by human data managers.
+You only ever set the pending-review status on new projects or datasets you create/add — `pendingReview` on projects, and the Dataset schema's own value (`pending-review`) on Dataset entities. Transitions to `approved` or `rejected` are made by human data managers.
 
 **Rule 4 — Do not modify CLAUDE.md, files in `lib/`, or files in `config/`, or files in `prompts/`.**
 Write all generated scripts to the workspace directory (`agent.workspace_dir` in `config/settings.yaml`) and execute them there.

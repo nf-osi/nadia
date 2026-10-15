@@ -241,7 +241,10 @@ Dataset annotations come from the `PortalDatasetCandidate` schema — see "Datas
 # Once per run, before the first dataset:
 ds_schema = resolve_dataset_schema(cfg)
 
-# Per dataset:
+# Per dataset. Every value comes from earlier steps — see the ctx table under
+# "Value derivation" below for where each one is sourced. Leave unknown values as None.
+n_direct_files, has_landing_link = populate_dataset_with_files(
+    syn, files_folder.id, accession_id, repository, landing_url)   # prompts/repo_apis.md
 ctx = {
     'title':               dataset_name,
     'description':         dataset_description,
@@ -561,6 +564,9 @@ def schema_properties_from_json(schema: dict) -> dict:
                 entry['type'] = field_def.get('type', 'string')
             entry['is_array'] = field_def.get('type') == 'array'
             entry['required'] = field_name in required
+            item_def = field_def.get('items', {}) if isinstance(field_def.get('items'), dict) else {}
+            if field_def.get('pattern') or item_def.get('pattern'):
+                entry['pattern'] = field_def.get('pattern') or item_def.get('pattern')
             entry['description'] = field_def.get('description', '')
             props[field_name] = entry
         for defs_key in ('definitions', '$defs'):
@@ -881,7 +887,7 @@ valid_manifestation  = study_props['manifestation']['enum']   # ManifestationEnu
 valid_data_type      = study_props['dataType']['enum']        # Data enum
 ```
 
-Map every value through `validate_against_enum()` (`prompts/annotation_gap_fill.md`) and store its return value. `dataType` values are spaced lowercase (`gene expression`, `genomic variants`, `aligned reads`) — never camelCase. Infer the category from the repository's library strategy or assay description, not the paper title.
+Choose values by exact match against these enums (ignoring case only) — not via `validate_against_enum()`, whose substring step silently turns `MPNST` into `Atypical MPNST`. If no value fits, flag it in the curation comment rather than approximating. `dataType` values are spaced lowercase (`gene expression`, `genomic variants`, `aligned reads`) — never camelCase. Infer the category from the repository's library strategy or assay description, not the paper title.
 
 ---
 
@@ -1503,7 +1509,7 @@ Validation warnings are expected at this stage — some required fields can only
 
 Dataset-entity annotations are driven by the registered **`PortalDatasetCandidate`** class (`synapse.schema.dataset_schema_uri` in `config/settings.yaml`), the same way File annotations are driven by the bound template. **There is no hardcoded Dataset key list anywhere** — the keys written are exactly the schema's properties that the source data supports, and the schema's `required` array is the completeness check.
 
-Define `schema_properties_from_json()` / `fetch_schema_properties()` / `schema_required()` (Step A2 above), `validate_against_enum()` (`prompts/annotation_gap_fill.md`), `REPO_TO_PREFIX` / `REPO_DISPLAY_NAME` (CLAUDE.md), and `REPO_LANDING_URL` (`prompts/repo_apis.md`) in the same script.
+Define `schema_properties_from_json()` / `fetch_schema_properties()` / `schema_required()` (Step A2 above), `REPO_TO_PREFIX` / `REPO_DISPLAY_NAME` (CLAUDE.md), and `REPO_LANDING_URL` (`prompts/repo_apis.md`) in the same script.
 
 ### `resolve_dataset_schema()` — three tiers, never a hardcoded fallback
 
@@ -1589,6 +1595,7 @@ Each schema field is derived from a **dataset context** (`ctx`) assembled at Ste
 | `dataset_doi` | DOI of the **data deposit** (Zenodo/figshare/Dryad/DataCite) — never the paper DOI |
 | `publication_doi` | Paper DOI (written as `citation`) |
 | `description` | Dataset description from Step 2 |
+| `specimen_count`, `individual_count` | Integers, only when the repository states them (e.g. GEO sample count) |
 
 **Rules for the fields that need judgment:**
 
@@ -1629,15 +1636,19 @@ def map_funder_enum(agencies, grant_ids=(), no_external_funding=False) -> tuple[
             add('GFF')
         elif re.search(r'neurofibromatosis therapeutic acceleration|\bntap\b', al):
             add('NTAP')
-        elif re.search(r'national cancer institute|\bnci\b', al):
-            add('NIH-NCI')
+        elif re.search(r'national cancer institute|\bnci\b', al) and not re.search(
+                r'canada|canadian|ireland|japan|korea|france|italy|netherlands', al):
+            add('NIH-NCI')                  # US NCI only — other national cancer institutes → Other
         elif re.search(r'\bnih\b|national institutes? of health', al) and not re.search(
                 r'\bnin?ds\b|\bnichd\b|\bnhgri\b|\bnhlbi\b|\bniaid\b|\bnimh\b|\bnia\b|\bnei\b|'
                 r'\bniams\b|\bnidcd\b|\bnigms\b|\bnibib\b|\bniddk\b|\bncats\b|national institute of (?!health)', al):
             generic_nih = True          # institute unknown — decide from grant IDs below
         else:
             add('Other')                # includes NINDS, NICHD, DoD, foreign agencies, ...
-    has_nci_grant = any(NCI_GRANT_RE.search(str(g).upper()) for g in grant_ids or [])
+    # The CA activity code only means NCI on an NIH grant — ignore it for other agencies
+    nih_present = generic_nih or any(re.search(r'\bnih\b|national institutes? of health', a.lower())
+                                     for a in agencies or [])
+    has_nci_grant = nih_present and any(NCI_GRANT_RE.search(str(g).upper()) for g in grant_ids or [])
     if has_nci_grant:
         add('NIH-NCI')
     elif generic_nih:
@@ -1680,7 +1691,8 @@ DATASET_FIELD_DERIVERS = {
     'externalRepositoryUri': _external_repository_uri,
     'repository':            lambda c: REPO_DISPLAY_NAME.get(c.get('source_repository'), c.get('source_repository')),
     'externalUrl':           _external_url,
-    'hosting':               lambda c: derive_hosting(c.get('n_direct_files', 0), c.get('has_landing_link', False)),
+    'hosting':               lambda c: (derive_hosting(c['n_direct_files'], c.get('has_landing_link', False))
+                                        if 'n_direct_files' in c else None),   # unknown folder state → don't guess
     'accessType':            lambda c: ('Controlled Access'
                                         if c.get('access_type') == 'controlled'
                                         or c.get('source_repository') in CONTROLLED_ACCESS_REPOS
@@ -1702,6 +1714,25 @@ DATASET_FIELD_DERIVERS = {
 }
 
 
+def check_dataset_value(value, prop: dict):
+    """
+    Return the schema-valid form of one value, or None. Enum values must match exactly
+    (ignoring case/punctuation) — NOT validate_against_enum(), whose substring step turns
+    'MPNST' into 'Atypical MPNST' and 'Schwannomatosis' into '22q-related schwannomatosis'.
+    Unmatched values are dropped and reported, never approximated.
+    """
+    if prop.get('enum'):
+        return {_canon(e): e for e in prop['enum']}.get(_canon(value))
+    if prop.get('type') == 'integer':
+        try:
+            return int(value)
+        except (TypeError, ValueError):
+            return None
+    if prop.get('pattern') and not re.search(prop['pattern'], str(value)):
+        return None
+    return value
+
+
 def build_dataset_annotations(ctx: dict, props: dict) -> dict:
     """
     Derive Dataset annotation values for every schema property the context supports.
@@ -1714,16 +1745,9 @@ def build_dataset_annotations(ctx: dict, props: dict) -> dict:
         if raw in (None, '', []):
             continue
         items = raw if isinstance(raw, list) else [raw]
-        enum = prop.get('enum')
-        if enum:
-            if field in ('license', 'resourceStatus'):
-                # exact (canonicalized) match only — no fuzzy matching for these
-                lookup = {_canon(e): e for e in enum}
-                mapped = [lookup.get(_canon(v)) for v in items]
-            else:
-                mapped = [validate_against_enum(str(v), prop) for v in items]
-            dropped += [f'{field}={v!r}' for v, m in zip(items, mapped) if m is None]
-            items = list(dict.fromkeys(m for m in mapped if m is not None))
+        mapped = [check_dataset_value(v, prop) for v in items]
+        dropped += [f'{field}={v!r}' for v, m in zip(items, mapped) if m is None]
+        items = list(dict.fromkeys(m for m in mapped if m is not None))
         if not items:
             continue
         values[field] = items if prop.get('is_array') else items[0]
@@ -1797,6 +1821,29 @@ def annotate_dataset_entity(syn, dataset_id: str, ctx: dict, ds_schema: dict,
 
     report.update(status='ok', written=written, validation_errors=errors, **built)
     return report
+
+
+LANDING_PAGE_PATTERNS = (
+    'acc.cgi', 'dataset.jsp', '/records/', '/record/', 'view/detail',
+    'study.cgi', 'ProteoSAFe/dataset', 'cellimagelibrary.org/image',
+)
+
+def files_folder_state(syn, files_folder_id: str) -> tuple[int, bool]:
+    """
+    (n_direct_files, has_landing_link) for a files folder as it is now — the inputs to
+    derive_hosting(). Counts ExternalLink entities (controlled access, >100 files, MassIVE,
+    TCIA) as landing links, plus a sole File entity whose URL is a landing page.
+    """
+    import urllib.parse, posixpath
+    files = list(syn.getChildren(files_folder_id, includeTypes=['file']))
+    links = list(syn.getChildren(files_folder_id, includeTypes=['link']))
+    sole_landing = False
+    if len(files) == 1:
+        fe = syn.get(files[0]['id'], downloadFile=False)
+        url = getattr(fe, 'externalURL', '') or ''
+        ext = posixpath.splitext(urllib.parse.urlparse(url).path)[1]
+        sole_landing = bool(url) and (any(p in url for p in LANDING_PAGE_PATTERNS) or not ext)
+    return len(files) - int(sole_landing), sole_landing or bool(links)
 
 
 def dataset_context_from_project(project_ann: dict, proj: dict, ds: dict) -> dict:
@@ -2005,8 +2052,9 @@ for prop_name, prop_def in schema_props.items():
     ANNOTATION_COLUMNS.append((prop_name, 'STRING', size, facet))
 
 # Dataset-entity schema (PortalDatasetCandidate) — resolved once per audit run.
-# Define resolve_dataset_schema(), annotate_dataset_entity() and dataset_context_from_project()
-# from "Dataset Entity Annotations — Schema-Driven" in this file.
+# Define resolve_dataset_schema(), annotate_dataset_entity(), bind_dataset_schema(),
+# files_folder_state() and dataset_context_from_project() from
+# "Dataset Entity Annotations — Schema-Driven" in this file.
 import yaml
 with open('config/settings.yaml') as _f:
     cfg = yaml.safe_load(_f)
@@ -2168,7 +2216,6 @@ for proj in created:
         print(f"\n  Dataset: {repo}:{acc}")
 
         # 4a. List files
-        landing_detected = False   # feeds Dataset `hosting` re-derivation in 4d
         try:
             file_children = list(syn.getChildren(files_folder_id, includeTypes=['file']))
             print(f"    Files: {len(file_children)}")
@@ -2195,7 +2242,6 @@ for proj in created:
                         or (not path_ext and sole_url)  # URL with no file extension
                     )
                     if is_landing:
-                        landing_detected = True
                         result['warnings'].append(
                             f'{acc}: LANDING_PAGE_FALLBACK — files folder contains only a '
                             f'landing-page link ({sole_url[:120]}). '
@@ -2492,9 +2538,9 @@ for proj in created:
                 ctx = dict(ds.get('dataset_context') or dataset_context_from_project(
                     project_cur, proj, ds))
                 ctx['title'] = ds_body.get('name', ctx.get('title'))
-                ctx['n_direct_files'] = len(file_children) - (1 if landing_detected else 0)
-                ctx['has_landing_link'] = landing_detected
+                ctx['n_direct_files'], ctx['has_landing_link'] = files_folder_state(syn, files_folder_id)
                 ds_report = annotate_dataset_entity(syn, dataset_id, ctx, DS_SCHEMA, only_missing=True)
+                bind_dataset_schema(syn, dataset_id, DS_SCHEMA)   # no-op unless registry tier
                 result.setdefault('dataset_annotation_reports', []).append(
                     {'accession_id': acc, **ds_report})
                 if ds_report['status'] == 'DATASET_SCHEMA_UNAVAILABLE':
@@ -2720,8 +2766,9 @@ with open('{WORKSPACE_DIR}/audit_reasoning_fixes.json') as f:
 with open('{WORKSPACE_DIR}/created_projects.json') as f:
     created = json.load(f)
 
-# Define resolve_dataset_schema(), annotate_dataset_entity(), _ann_entry(), bind_dataset_schema(),
-# dataset_context_from_project() (this file) and validate_against_enum() (annotation_gap_fill.md).
+# Define resolve_dataset_schema(), annotate_dataset_entity(), check_dataset_value(), _ann_entry(),
+# bind_dataset_schema(), files_folder_state() and dataset_context_from_project() from
+# "Dataset Entity Annotations — Schema-Driven" in this file.
 import yaml
 with open('config/settings.yaml') as _f:
     cfg = yaml.safe_load(_f)
@@ -2757,40 +2804,60 @@ for proj_fix in fixes:
             ))
             print(f"  Wiki: created")
 
-    # Apply Dataset annotation fixes — keys must exist in the dataset schema; enum values
-    # are validated. Merged into existing annotations, never replacing the dict.
+    # Apply Dataset annotation fixes — keys must exist in the dataset schema and values must
+    # pass check_dataset_value(). Merged into existing annotations, never replacing the dict.
+    # resourceStatus and studyId are never written here (Rule 3; studyId is set at provisioning).
+    PROTECTED_DATASET_KEYS = {'resourceStatus', 'studyId'}
     if proj_fix.get('dataset_annotation_fixes') or proj_fix.get('retry_dataset_schema'):
         if DS_SCHEMA['props'] is None:
             print(f"  Dataset fixes skipped: DATASET_SCHEMA_UNAVAILABLE ({DS_SCHEMA['error']})")
         else:
             for ds_fix in proj_fix.get('dataset_annotation_fixes', []):
-                ann = syn.restGET(f"/entity/{ds_fix['dataset_id']}/annotations2")
-                applied = []
-                for k, v in ds_fix['annotations'].items():
-                    prop = DS_SCHEMA['props'].get(k)
-                    if prop is None:
-                        print(f"  Dataset {ds_fix['dataset_id']}: {k} not in schema — skipped")
-                        continue
-                    vals = v if isinstance(v, list) else [v]
-                    if prop.get('enum'):
-                        vals = [m for m in (validate_against_enum(str(x), prop) for x in vals) if m]
-                    if vals:
+                try:
+                    ann = syn.restGET(f"/entity/{ds_fix['dataset_id']}/annotations2")
+                    applied, skipped = [], []
+                    for k, v in ds_fix['annotations'].items():
+                        prop = DS_SCHEMA['props'].get(k)
+                        if prop is None or k in PROTECTED_DATASET_KEYS:
+                            skipped.append(k)
+                            continue
+                        vals = [m for m in (check_dataset_value(x, prop)
+                                            for x in (v if isinstance(v, list) else [v])) if m is not None]
+                        if not vals:
+                            skipped.append(k)
+                            continue
                         ann['annotations'][k] = _ann_entry(vals if prop.get('is_array') else vals[0], prop)
                         applied.append(k)
-                syn.restPUT(f"/entity/{ds_fix['dataset_id']}/annotations2", json.dumps(ann))
-                print(f"  Dataset {ds_fix['dataset_id']}: annotations updated {applied}")
+                    if applied:
+                        syn.restPUT(f"/entity/{ds_fix['dataset_id']}/annotations2", json.dumps(ann))
+                    print(f"  Dataset {ds_fix['dataset_id']}: updated {applied}, skipped {skipped}")
+                except Exception as e:
+                    print(f"  Dataset {ds_fix.get('dataset_id')} fix failed: {e}")
+
             # Datasets whose schema was unavailable in Phase 1: run the builder now
+            proj_rec = next((p for p in created if p['synapse_project_id'] == project_id), {})
             for retry in proj_fix.get('retry_dataset_schema', []):
-                ds_rec = next((d for p in created for d in p.get('datasets', [])
-                               if d.get('dataset_id') == retry['dataset_id']), {})
-                ctx = ds_rec.get('dataset_context') or dataset_context_from_project(
-                    {k: v['value'] for k, v in
-                     syn.restGET(f'/entity/{project_id}/annotations2')['annotations'].items()},
-                    next(p for p in created if p['synapse_project_id'] == project_id), ds_rec)
-                rep = annotate_dataset_entity(syn, retry['dataset_id'], ctx, DS_SCHEMA, only_missing=True)
-                bind_dataset_schema(syn, retry['dataset_id'], DS_SCHEMA)
-                print(f"  Dataset {retry['dataset_id']}: schema retry → {rep['status']} "
-                      f"missing={rep.get('missing_required')}")
+                try:
+                    ds_rec = next((d for d in proj_rec.get('datasets', [])
+                                   if d.get('dataset_id') == retry['dataset_id']), {})
+                    ctx = dict(ds_rec.get('dataset_context') or dataset_context_from_project(
+                        {k: v['value'] for k, v in
+                         syn.restGET(f'/entity/{project_id}/annotations2')['annotations'].items()},
+                        proj_rec, ds_rec))
+                    ctx['title'] = syn.restGET(f"/entity/{retry['dataset_id']}")['name']
+                    if ds_rec.get('files_folder_id'):
+                        ctx['n_direct_files'], ctx['has_landing_link'] = \
+                            files_folder_state(syn, ds_rec['files_folder_id'])
+                    else:
+                        ctx.pop('n_direct_files', None)   # unknown → leave hosting for Phase 2
+                    rep = annotate_dataset_entity(
+                        syn, retry['dataset_id'], ctx, DS_SCHEMA, only_missing=True,
+                        always_refresh=('hosting',) if ds_rec.get('files_folder_id') else ())
+                    bind_dataset_schema(syn, retry['dataset_id'], DS_SCHEMA)
+                    print(f"  Dataset {retry['dataset_id']}: schema retry → {rep['status']} "
+                          f"missing={rep.get('missing_required')}")
+                except Exception as e:
+                    print(f"  Dataset {retry.get('dataset_id')} schema retry failed: {e}")
 
     # Apply file annotation fixes
     for file_fix in proj_fix.get('file_annotation_fixes', []):

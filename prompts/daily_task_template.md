@@ -171,7 +171,7 @@ For each approved group (max 50 write operations total):
    d. If > 100 files or controlled access: create one `ExternalLink` to the landing page
    e. Annotate the Dataset entity from the `PortalDatasetCandidate` schema via `annotate_dataset_entity()` (`prompts/synapse_workflow.md` → "Dataset Entity Annotations — Schema-Driven"). Resolve the schema once per run with `resolve_dataset_schema()`; record each report in `created_projects.json`
    f. Set provenance on each File/Link entity
-4. Apply project-level annotations (study, resourceType, resourceStatus=pendingReview, pmid, doi)
+4. Apply project-level annotations (`curation_checklist.required_project_annotations` from config, with resourceStatus=pendingReview, plus pmid, doi)
 5. Create wiki page using CLAUDE.md template — include the full datasets table
 
 **For ADD groups:**
@@ -208,7 +208,7 @@ The audit script (code in `prompts/synapse_workflow.md`):
   - Dataset entity annotations missing → fill from the `PortalDatasetCandidate` schema with the same builder as creation; re-derive `hosting` from the files folder; required fields still missing → Phase 2 `reasoning_gaps`; schema unavailable → `DATASET_SCHEMA_UNAVAILABLE` (never a hardcoded default set)
   - `fileFormat` with compression suffix (`.gz`) → strip to bare extension
   - `resourceType` missing → `experimentalData`
-  - `externalAccessionID`/`externalRepository`/`study` missing → set from known metadata
+  - File entities only: `externalAccessionID`/`externalRepository`/`study` missing → set from known metadata, if the bound file template defines them (Dataset entities never carry these keys)
   - `dataSubtype` missing → infer from file extension (`raw` for fastq/bam/vcf, `processed` otherwise)
   - `specimenID`/`individualID` parseable from filename (GSM/SRR/ERR prefix) → set
   - Schema binding missing → bind the schema
