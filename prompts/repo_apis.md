@@ -12,7 +12,8 @@ Apply this pattern for **every** repository. The goal is always: enumerate indiv
 def populate_dataset_with_files(syn, files_folder_id, accession_id, repository, landing_url):
     """
     General pattern used for all repositories.
-    Returns the number of File entities created.
+    Returns (n_direct_files, has_landing_link) — both feed the Dataset `hosting`
+    annotation (see "Dataset Entity Annotations — Schema-Driven" in synapse_workflow.md).
     """
     files = get_file_list(accession_id, repository)  # repo-specific, see below
     # files = list of (filename: str, download_url: str)
@@ -26,7 +27,7 @@ def populate_dataset_with_files(syn, files_folder_id, accession_id, repository, 
             synapseStore=False,
             path=landing_url,
         ))
-        return 0
+        return 0, True
 
     for filename, download_url in files:
         syn.store(File(
@@ -35,7 +36,39 @@ def populate_dataset_with_files(syn, files_folder_id, accession_id, repository, 
             synapseStore=False,
             path=download_url,
         ))
-    return len(files)
+    return len(files), False
+```
+
+### Landing-page URLs — one map for every repository
+
+`landing_url` (above) and the Dataset `externalUrl` annotation both come from this map. Prefer the repository record's own URL when the API returns one; otherwise format the template with the accession. Add new repositories here rather than inline in a connector.
+
+```python
+REPO_LANDING_URL = {
+    'GEO':                'https://www.ncbi.nlm.nih.gov/geo/query/acc.cgi?acc={acc}',
+    'SRA':                'https://www.ncbi.nlm.nih.gov/sra/?term={acc}',
+    'ENA':                'https://www.ebi.ac.uk/ena/browser/view/{acc}',
+    'BioProject':         'https://www.ncbi.nlm.nih.gov/bioproject/{acc}',
+    'dbGaP':              'https://www.ncbi.nlm.nih.gov/projects/gap/cgi-bin/study.cgi?study_id={acc}',
+    'EGA':                'https://ega-archive.org/studies/{acc}',
+    'ArrayExpress':       'https://www.ebi.ac.uk/biostudies/arrayexpress/studies/{acc}',
+    'PRIDE':              'https://www.ebi.ac.uk/pride/archive/projects/{acc}',
+    'MassIVE':            'https://massive.ucsd.edu/ProteoSAFe/dataset.jsp?accession={acc}',
+    'MetaboLights':       'https://www.ebi.ac.uk/metabolights/{acc}',
+    'CELLxGENE':          'https://cellxgene.cziscience.com/collections/{acc}',
+    'Zenodo':             'https://zenodo.org/records/{acc}',
+    'Figshare':           'https://figshare.com/articles/dataset/_/{acc}',
+    'OSF':                'https://osf.io/{acc}/',
+    'PDC':                'https://pdc.cancer.gov/pdc/study/{acc}',
+    'cBioPortal':         'https://www.cbioportal.org/study/summary?id={acc}',
+    'Dryad':              'https://datadryad.org/dataset/doi:10.5061/{acc}',
+    'Cell Image Library': 'https://www.cellimagelibrary.org/images/{acc}',
+    'NCI GDC':            'https://portal.gdc.cancer.gov/projects/{acc}',
+    'TCIA':               'https://www.cancerimagingarchive.net/collection/{acc}',
+    'OpenNeuro':          'https://openneuro.org/datasets/{acc}',
+    'Mendeley Data':      'https://data.mendeley.com/datasets/{acc}',
+}
+# DOI-only repositories (Science Data Bank, TIB, other DataCite-indexed): https://doi.org/{doi}
 ```
 
 **Note on filenames with special characters:** Synapse rejects URLs containing unencoded spaces, commas, or slashes. Always encode filenames in URLs:
@@ -463,8 +496,8 @@ def get_file_list_mendeley(dataset_id: str) -> list[tuple[str, str]]:
 ```python
 def get_file_list_ega(accession: str) -> list[tuple[str, str]]:
     return []  # always falls back to landing page; access requires application
-# Use path= pointing to: https://ega-archive.org/studies/{accession}
-# Set accessType=controlled in annotations
+# Use path= pointing to: REPO_LANDING_URL['EGA']
+# Dataset annotations: accessType='Controlled Access', hosting='external-access' (derived automatically)
 ```
 
 ---
@@ -474,9 +507,8 @@ def get_file_list_ega(accession: str) -> list[tuple[str, str]]:
 ```python
 def get_file_list_dbgap(accession: str) -> list[tuple[str, str]]:
     return []  # always falls back to landing page; access requires dbGaP application
-# Use path= pointing to:
-#   https://www.ncbi.nlm.nih.gov/projects/gap/cgi-bin/study.cgi?study_id={accession}
-# Set accessType=controlled in annotations
+# Use path= pointing to: REPO_LANDING_URL['dbGaP']
+# Dataset annotations: accessType='Controlled Access', hosting='external-access' (derived automatically)
 ```
 
 ---
@@ -567,7 +599,7 @@ def get_file_list_tcia(collection_name: str) -> list[tuple[str, str]]:
     return []
 # Use path= pointing to:
 #   https://www.cancerimagingarchive.net/collection/{collection_name}
-# Set fileFormat=DICOM in annotations, accessType=open
+# Set fileFormat=DICOM on files; Dataset accessType='Open Access' (derived automatically)
 ```
 
 ---

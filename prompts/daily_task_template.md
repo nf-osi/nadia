@@ -143,9 +143,10 @@ Write and run `{WORKSPACE_DIR}/score.py`:
 1. Score all groups in the `new` and `add` lists from dedup_results.json
 2. For groups with a PMID, use the PubMed abstract (already fetched in Step 2) — this is the richest scoring input
 3. Call `claude-sonnet-4-6` with the publication-level scoring prompt from CLAUDE.md
-4. Apply filters: score ≥ 0.70, is_primary_data = true, sample_count ≥ 3 (if known)
-5. Save approved + rejected groups to `{WORKSPACE_DIR}/scored.json`
-6. Print each result:
+4. Emit `disease_focus` values only from `DiseaseFocusEnum`, fetched at runtime with `fetch_schema_properties('org.synapse.nf-portalstudy')['diseaseFocus']['enum']` (see `prompts/synapse_workflow.md`). Do not read disease vocabulary from `config/settings.yaml`.
+5. Apply filters: score ≥ 0.70, is_primary_data = true, sample_count ≥ 3 (if known)
+6. Save approved + rejected groups to `{WORKSPACE_DIR}/scored.json`
+7. Print each result:
    ```
    [NEW][APPROVED]  "Pembrolizumab in MPNSTs" (PMID:41760889) — 0.95 — 2 datasets: GEO:GSE301187, SRA:SRP123
    [ADD][APPROVED]  "NF2 Schwann cell proteomics" (PMID:41234567) — 0.88 — adding PRIDE:PXD012345 to syn12345
@@ -168,9 +169,9 @@ For each approved group (max 50 write operations total):
    b. Enumerate individual file download URLs from the source repository (see CLAUDE.md "How to Get Direct Download URLs Per Repository")
    c. If ≤ 100 files and direct URLs available: create one `File` entity per file with `externalURL=<direct_download_url>`, `synapseStore=False`
    d. If > 100 files or controlled access: create one `ExternalLink` to the landing page
-   e. Apply dataset-folder-level annotations (contentType=dataset, externalAccessionID, assay, species, etc.)
+   e. Annotate the Dataset entity from the `PortalDatasetCandidate` schema via `annotate_dataset_entity()` (`prompts/synapse_workflow.md` → "Dataset Entity Annotations — Schema-Driven"). Resolve the schema once per run with `resolve_dataset_schema()`; record each report in `created_projects.json`
    f. Set provenance on each File/Link entity
-4. Apply project-level annotations (study, resourceType, resourceStatus=pendingReview, pmid, doi)
+4. Apply project-level annotations (`curation_checklist.required_project_annotations` from config, with resourceStatus=pendingReview, plus pmid, doi)
 5. Create wiki page using CLAUDE.md template — include the full datasets table
 
 **For ADD groups:**
@@ -197,17 +198,17 @@ The audit script (code in `prompts/synapse_workflow.md`):
   - `dataStatus` missing → `Available`
   - `resourceStatus` missing → `pendingReview`
   - `studyName` missing → set from project name
-  - `fundingAgency` missing → `Not Applicable (External Study)`
+  - `fundingAgency` missing → `Other` (last-resort placeholder; Phase 2 replaces it from GrantList / PMC Acknowledgements)
   - `pmid`/`doi` missing but known → set from project metadata
   - Data manager team permissions (`synapse.team_id` from config) missing → grant
   - Dataset `items` empty → re-link from files folder
   - Dataset item versions stale (linked version < current file version) → sync each item to its file's current `versionNumber`
   - **NEVER mint stable Dataset versions in Phase 1** — Phase 1 runs before Phase 3 applies annotation fixes; a v1 snapshot minted here will point to unannotated file versions. Phase 3 is the only step that mints. See Audit Lessons 23, 24 in `prompts/synapse_workflow.md`.
   - Dataset `columnIds` missing or wrong order → create/rebuild with `id` and `name` as first two columns, then annotation columns alphabetically
-  - Dataset entity annotations missing → set defaults
+  - Dataset entity annotations missing → fill from the `PortalDatasetCandidate` schema with the same builder as creation; re-derive `hosting` from the files folder; required fields still missing → Phase 2 `reasoning_gaps`; schema unavailable → `DATASET_SCHEMA_UNAVAILABLE` (never a hardcoded default set)
   - `fileFormat` with compression suffix (`.gz`) → strip to bare extension
   - `resourceType` missing → `experimentalData`
-  - `externalAccessionID`/`externalRepository`/`study` missing → set from known metadata
+  - File entities only: `externalAccessionID`/`externalRepository`/`study` missing → set from known metadata, if the bound file template defines them (Dataset entities never carry these keys)
   - `dataSubtype` missing → infer from file extension (`raw` for fastq/bam/vcf, `processed` otherwise)
   - `specimenID`/`individualID` parseable from filename (GSM/SRR/ERR prefix) → set
   - Schema binding missing → bind the schema

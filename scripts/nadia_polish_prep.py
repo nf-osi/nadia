@@ -241,17 +241,20 @@ def fetch_schema_properties(schema_uri):
     def collect(obj):
         if not isinstance(obj, dict):
             return
+        required = set(obj.get('required', []))
         for name, defn in obj.get('properties', {{}}).items():
             if not isinstance(defn, dict):
                 continue
-            entry = {{'type': defn.get('type', 'string'), 'description': defn.get('description', '')}}
-            if 'enum' in defn:
-                entry['enum'] = defn['enum']
-            else:
-                for sub_key in ('anyOf', 'oneOf'):
-                    for sub in defn.get(sub_key, []):
-                        if 'enum' in sub:
-                            entry['enum'] = sub['enum']
+            entry = {{'type': defn.get('type', 'string'), 'description': defn.get('description', ''),
+                      'required': name in required}}
+            # Enums may sit on the field, under anyOf/oneOf, or under 'items'
+            # for multivalued fields (diseaseFocus, dataType, cellType, ...)
+            for cand in [defn] + defn.get('anyOf', []) + defn.get('oneOf', []):
+                if not isinstance(cand, dict):
+                    continue
+                for node in (cand, cand.get('items', {{}})):
+                    if isinstance(node, dict) and 'enum' in node and 'enum' not in entry:
+                        entry['enum'] = node['enum']
             props[name] = entry
         for defs_key in ('definitions', '$defs'):
             for d in obj.get(defs_key, {{}}).values():
@@ -262,6 +265,11 @@ def fetch_schema_properties(schema_uri):
 schema_props = fetch_schema_properties(schema_uri)
 # Use schema_props[field]['enum'] to validate values before writing
 # e.g. valid_assays = schema_props.get('assay', {{}}).get('enum', [])
+
+# Project-level controlled vocabulary (diseaseFocus, manifestation, dataType)
+# comes from the PortalStudy class — never from config/settings.yaml
+study_props = fetch_schema_properties('org.synapse.nf-portalstudy')
+# e.g. valid_disease_focus = study_props['diseaseFocus']['enum']
 ```
 
 **Never set a value that isn't in the enum.** If you can't find an exact match,
@@ -283,12 +291,12 @@ Work through **every field** in the tables below. For each one:
 | `studyName` | PubMed title | Verify it's the full title, not truncated |
 | `studyStatus` | Published? | Always `Completed` for published studies |
 | `dataStatus` | Data accessible? | `Available` if repo is accessible |
-| `diseaseFocus` | Abstract | From `config/settings.yaml` vocabulary |
-| `manifestation` | Abstract | Be specific — plexiform vs cutaneous neurofibroma matter |
-| `dataType` | Repo metadata | `geneExpression`, `genomicVariants`, `proteomics`, etc. |
+| `diseaseFocus` | Abstract | `DiseaseFocusEnum` from `org.synapse.nf-portalstudy` (fetch at runtime) |
+| `manifestation` | Abstract | `ManifestationEnum` from `org.synapse.nf-portalstudy`. Be specific — plexiform vs cutaneous neurofibroma matter |
+| `dataType` | Repo metadata | `Data` enum from `org.synapse.nf-portalstudy` — spaced lowercase, e.g. `gene expression`, `genomic variants`, `proteomics` |
 | `studyLeads` | PubMed AuthorList | First author + last/corresponding author |
 | `institutions` | PubMed affiliations | Institutions of study leads, not all co-authors |
-| `fundingAgency` | PubMed GrantList | Agency names, not grant IDs |
+| `fundingAgency` | PubMed GrantList, then PMC Acknowledgements | Free text: verbatim agency names, not grant IDs. If none found, `Other` — and say so in the summary comment |
 | `pmid` | PubMed | Verify |
 | `doi` | PubMed | Verify |
 | `alternateDataRepository` | All accessions | `prefix:accession` format |
@@ -314,7 +322,10 @@ Work through **every field** in the tables below. For each one:
 **Also check:**
 - `resourceStatus` should NOT be set on File entities — remove it if present
 - `filename` should NOT be a custom annotation on File entities — remove it if present
-- Dataset entities should have `studyId`, `title`, `creator`, `contentType`, `resourceStatus` annotations
+- Dataset entity annotations are schema-driven: fetch `org.synapse.nf-portaldatasetcandidate` with
+  `fetch_schema_properties()` and check every property flagged `required` is set and enum-valid
+  (derivation rules: "Dataset Entity Annotations — Schema-Driven" in `prompts/synapse_workflow.md`).
+  Never add keys the schema does not define; `studyId` is set only at provisioning
 - Dataset entity name must be descriptive: format `{{assay}} — {{cell/tissue type, condition}} ({{repo}} {{accession}})` — not just `GEO_GSE123456`
 - `fileFormat` must strip compression suffixes: `fastq.gz` → `fastq`, `txt.gz` → `txt`
 - `specimenID` and `individualID` must be unique per file — not the same value copied to all files
