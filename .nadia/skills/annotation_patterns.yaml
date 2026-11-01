@@ -517,6 +517,46 @@ patterns:
     issues: [35]
     added: "2026-05-03"
 
+  - pattern: "species-not-in-enum-leave-unset"
+    rule: >
+      Species / organism / taxon is an IDENTITY field — there is no meaningful
+      "closest" value. When the verified species (from GEO `!Series_sample_taxid`,
+      ENA `scientific_name`, or BioStudies `Organism`) is not present in the schema
+      enum, leave the field UNSET. Do NOT approximate it to a different organism to
+      satisfy the "use the closest valid enum value" guidance (CLAUDE.md Standards 1
+      and 9) — that guidance is for descriptive/ordinal fields, NOT for identity
+      fields. A wrong organism silently corrupts portal species search and filters,
+      which is worse than a missing value.
+      Required handling when species is not in the enum:
+        1. Leave `species` unset on every affected file AND on the Dataset entity
+           (do not substitute human/mouse/other).
+        2. Document the gap in the GitHub curation comment with the verified
+           scientific name and taxid.
+        3. Recommend a PR to `nf-osi/nf-metadata-dictionary` adding the organism to
+           the species enum, so the field can be backfilled without re-ingestion.
+      Issue #377: samples were dog (Canis lupus familiaris, taxid 9615), not in the
+      RNASeqTemplate or PortalDatasetCandidate species enum. Leaving species unset
+      (rather than approximating) was correct. The same logic applies to any identity
+      enum field with no valid value for the true entity.
+    source: confirmed
+    issues: [377]
+    added: "2026-11-01"
+
+  - pattern: "funder-Other-is-correct-for-non-nf-agencies"
+    rule: >
+      The Dataset `funder` field uses `FundingAgencyEnum`, which is deliberately
+      scoped to NF-relevant funders (CTF, GFF, NTAP, NIH-NCI, etc.). For any funding
+      agency NOT in that enum, `Other` is the CORRECT value — it is not a gap, not an
+      error, and must not be flagged for rework. Do NOT invent new funder enum values
+      or attempt to extend FundingAgencyEnum for ordinary agencies. Always preserve
+      the verbatim agency name(s) on the PROJECT-level `fundingAgency` free-text field
+      (from PubMed GrantList, then PMC Acknowledgements) so the specific funder is
+      never lost. Issue #377 confirmed: multiple non-NF funders correctly mapped to
+      `Other` on the Dataset while verbatim names were kept on the project field.
+    source: confirmed
+    issues: [377]
+    added: "2026-11-01"
+
   - pattern: "accessions-verify-generated-not-reused"
     rule: >
       Before associating a dataset accession with a paper's Synapse project, verify

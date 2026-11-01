@@ -610,6 +610,8 @@ These rules apply to every project, regardless of domain. They describe *princip
 
 Before writing any annotation, call `fetch_schema_properties(schema_uri)` to retrieve every field the schema defines, along with its enum constraints. Never use hardcoded field names or assume enum values from memory. If a source value is not in the enum, do not invent a mapping — use the closest valid enum value and flag it for human review in the GitHub curation comment.
 
+**Exception — identity fields have no "closest" value.** The closest-value guidance applies only to descriptive or ordinal fields. For *identity* fields — `species`/organism/taxon, cell-line name, or any field naming a discrete entity — there is no meaningful approximation (a dog is not "close to" a mouse; `HSC1λ` is not "close to" another line). When the verified value for an identity field is not in the enum, **leave the field unset** rather than substitute a different entity, and recommend a dictionary PR. Approximating an identity field silently corrupts portal search and filters, which is worse than a missing value. See Standard 4 for species specifically.
+
 **If a field's enum list is empty (`"enum": []`), do not set that field at all — an empty enum means no valid value exists for it in the current schema version.** Setting a field with no valid enum values will always fail validation.
 
 **Project-level controlled vocabulary comes from the registered PortalStudy schema, not config.** For `diseaseFocus`, `manifestation`, and `dataType` — on projects and in relevance scoring — fetch valid values at runtime with `fetch_schema_properties('org.synapse.nf-portalstudy')` (`DiseaseFocusEnum`, `ManifestationEnum`, `Data`). `config/settings.yaml` deliberately holds no vocabulary lists: a cached list goes stale. `dataType` values are spaced lowercase (`gene expression`, `genomic variants`) — never camelCase.
@@ -637,6 +639,8 @@ Repository submitter fields (ENA, ArrayExpress, PRIDE, etc.) reflect whoever dep
 ### 4 — Organism/species fields: always read from source metadata, never infer
 
 Any disease can appear across multiple species (human patient samples, mouse models, zebrafish, Drosophila, cell lines, etc.). When a schema defines an organism or taxon field, always read it from the repository's organism/taxon attribute — not from the disease context, model name, or study description. GEO `!Series_sample_taxid`, ENA `scientific_name`, and BioStudies `Organism` are authoritative. If the repository lists multiple species (e.g., human xenograft in mouse), include all distinct values.
+
+**When the verified species is not in the schema enum, leave the field unset — never approximate it to a different organism.** Species is an identity field (Standard 1): there is no "closest" species, and substituting a wrong organism corrupts portal species search and filters. Instead: (1) leave `species` unset on every affected file and on the Dataset entity, (2) document the verified scientific name and NCBI taxid in the GitHub curation comment, and (3) recommend a PR to `nf-osi/nf-metadata-dictionary` adding the organism to the species enum so the field can be backfilled without re-ingestion. Example (Issue #377): samples were `Canis lupus familiaris` (dog, taxid 9615), absent from the `RNASeqTemplate` and `PortalDatasetCandidate` species enums — species was correctly left unset, not approximated.
 
 ### 5 — Sample-varying fields: populate per-file from sample-level metadata, not study-level
 
@@ -674,7 +678,9 @@ A single study often deposits data in multiple repositories (GEO + SRA + BioProj
 
 ### 9 — Controlled vocabulary gaps: flag, don't silently drop; file a PR when a required field is blocked
 
-When a concept from the study is not in the schema enum (e.g., a tumor type or species not yet in the controlled vocabulary), use the closest available enum value AND explicitly document the gap in the GitHub curation comment. This ensures human reviewers know what was approximated and can request a vocabulary update if warranted. Do not silently omit required fields — a best-effort value with a flag is better than a missing field.
+When a concept from the study is not in the schema enum (e.g., a tumor type not yet in the controlled vocabulary), use the closest available enum value AND explicitly document the gap in the GitHub curation comment. This ensures human reviewers know what was approximated and can request a vocabulary update if warranted. Do not silently omit required fields — a best-effort value with a flag is better than a missing field.
+
+**Identity fields are the exception (Standard 1, Standard 4): do not approximate them.** For `species`/organism/taxon, cell-line name, or any field naming a discrete entity, there is no valid "closest" value — leave the field unset and recommend a dictionary PR rather than substituting a different entity. A wrong organism or cell line corrupts portal search; a missing value does not.
 
 **When a vocabulary gap blocks a required field on one or more projects, file a PR to `nf-osi/nf-metadata-dictionary` rather than leaving the issue open indefinitely.** The PR should add the missing term to the appropriate module YAML (typically `modules/Assay/Assay.yaml`), include a description and an ontology `meaning` URI (OBI, NBO, MMO, NCIT, or similar), and insert the term in alphabetical order within the enum. Reference the study that triggered the gap in the PR description. Set the annotation on the affected files to the new term value immediately — the annotation will be stored even before the schema PR merges, and validation will pass once the schema is updated.
 
