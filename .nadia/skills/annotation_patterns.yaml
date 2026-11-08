@@ -541,3 +541,31 @@ patterns:
     source: fix
     issues: [23]
     added: "2026-05-03"
+
+  - pattern: "dataset-annotation-column-length-limits"
+    rule: >
+      Dataset annotation content is validated against PortalDatasetCandidate, but the
+      HARD limits that break the portal Dataset Collection (syn50913342) come from its
+      column models: externalRepositoryUri STRING(22), title STRING(150),
+      measurementTechnique STRING_LIST(50), citation STRING(80), creator STRING_LIST(50,
+      max 10 items), doi LINK(50). A value longer than its column — or a list with more
+      items than allowed — breaks the collection when the dataset is added at approval
+      (provisioning adds it to the collection scope). Rules:
+        1. NEVER truncate an identifier field (externalRepositoryUri, doi, citation,
+           externalUrl). A cut-off CURIE or DOI points at the WRONG record — omit the
+           field and flag it rather than store a mangled identifier.
+        2. The chosen fix is schema-driven: nf-metadata-dictionary PR #1038 records each
+           column's maxLength / maximum_cardinality onto the Portal schemas, so
+           annotate_dataset_entity()'s Draft7Validator surfaces overflows as
+           validation_errors automatically. Do NOT hardcode column sizes in config or in
+           NADIA — they drift exactly as the vocabulary lists did; read them from the
+           schema at runtime.
+        3. Report every length/cardinality validation error in the curation comment under
+           "Items for human review". An overflow on a REQUIRED field
+           (externalRepositoryUri, title) BLOCKS approval — flag it so a data manager
+           widens the column (#1038) or shortens the value before provisioning.
+        4. When building the Dataset name/title, trim on a word boundary and remember the
+           collection title column is narrower than the 256-char Synapse name limit.
+    source: fix
+    issues: [379]
+    added: "2026-11-08"
