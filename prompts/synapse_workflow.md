@@ -199,7 +199,11 @@ context_str = f" — {', '.join(context_parts)}" if context_parts else ""
 # Synapse name allows: letters, numbers, spaces, underscores, hyphens, periods,
 # plus signs, apostrophes, parentheses — NO em-dash, NO colon
 dataset_name = f"{assay_label}{context_str} ({repository} {accession_id})"
-dataset_name = dataset_name[:256]  # Synapse name limit
+# Synapse name limit is 256; trim on a word boundary. The portal Dataset Collection
+# `title` column is narrower than this — annotate_dataset_entity()'s validator flags a
+# `title` overflow (see the length/cardinality note below). Never truncate identifiers.
+if len(dataset_name) > 256:
+    dataset_name = dataset_name[:256].rsplit(' ', 1)[0]
 
 # Description: one sentence covering what the data is, from where, and how many files
 dataset_description = (
@@ -1879,6 +1883,8 @@ def bind_dataset_schema(syn, dataset_id: str, ds_schema: dict) -> None:
 ```
 
 **Reporting.** Store each `annotate_dataset_entity()` report on the dataset's `created_projects.json` record as `dataset_annotation_report`. The GitHub curation comment must state, per dataset: `schema_source` (and `schema_id`), every entry in `defaults_used` (e.g. `license=UNKNOWN`, `funder` rolled up to `Other` with the verbatim agencies), every `dropped_invalid` value, every `missing_required` field with the reason, and any `validation_errors`. A `DATASET_SCHEMA_UNAVAILABLE` dataset goes under "Items for human review".
+
+**Length and cardinality (Issue #379).** `annotate_dataset_entity()` validates against the resolved schema document, so once the portal Dataset Collection (`syn50913342`) column limits are recorded on the schema (`maxLength` / `maximum_cardinality`, nf-metadata-dictionary PR #1038) an over-limit value or an over-long list appears in `validation_errors`. Do **not** hardcode these sizes — read them from the schema. Report every such entry in the curation comment under "Items for human review". An overflow on a **required** field (`externalRepositoryUri`, `title`) BLOCKS approval: adding the dataset to the collection at provisioning will fail, so a data manager must widen the column or shorten the value first. **Never truncate an identifier field** (`externalRepositoryUri`, `doi`, `citation`, `externalUrl`) — a cut-off CURIE/DOI points at the wrong record, so omit and flag it rather than store a mangled value.
 
 ---
 
